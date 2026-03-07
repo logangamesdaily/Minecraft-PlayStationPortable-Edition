@@ -1,0 +1,333 @@
+#include "ChunkRenderer.h"
+#include "../math/Frustum.h"
+#include "PSPRenderer.h"
+#include "Tesselator.h"
+#include "TileRenderer.h"
+#include <malloc.h>
+#include <pspgu.h>
+#include <pspgum.h>
+#include <pspkernel.h>
+#include <string.h>
+
+#define MAX_VERTS_PER_SUB_CHUNK 8000
+
+static CraftPSPVertex g_opaqueBuf[4][MAX_VERTS_PER_SUB_CHUNK];
+static CraftPSPVertex g_transBuf[4][MAX_VERTS_PER_SUB_CHUNK];
+static CraftPSPVertex g_transFancyBuf[4][MAX_VERTS_PER_SUB_CHUNK];
+static CraftPSPVertex g_emitBuf[4][MAX_VERTS_PER_SUB_CHUNK]; // Block-lit (torch) faces
+
+ChunkRenderer::ChunkRenderer(TextureAtlas *atlas)
+    : m_atlas(atlas), m_level(nullptr), m_compileStep(0), m_compileChunk(nullptr), m_compileSy(-1) {}
+
+ChunkRenderer::~ChunkRenderer() {}
+
+void ChunkRenderer::setLevel(Level *level) { m_level = level; }
+
+void ChunkRenderer::processCompileQueue(float camX, float camY, float camZ) {
+  if (!m_level)
+    return;
+
+  if (m_compileStep == 0) {
+    // Find the single closest dirty chunk sub-volume to rebuild first!
+    Chunk *closestDirty = nullptr;
+    int closestDirtySy = -1;
+    float closestDirtyDistSq = 9999999.0f;
+
+    for (int cx = 0; cx < WORLD_CHUNKS_X; cx++) {
+      for (int cz = 0; cz < WORLD_CHUNKS_Z; cz++) {
+        Chunk *c = m_level->getChunk(cx, cz);
+        if (c) {
+          for (int sy = 0; sy < 4; sy++) {
+            if (c->dirty[sy]) {
+              float chunkCenterX = c->cx * CHUNK_SIZE_X + CHUNK_SIZE_X / 2.0f;
+              float chunkCenterZ = c->cz * CHUNK_SIZE_Z + CHUNK_SIZE_Z / 2.0f;
+              float chunkCenterY = sy * 16 + 8.0f;
+              float dx = chunkCenterX - camX;
+              float dy = chunkCenterY - camY;
+              float dz = chunkCenterZ - camZ;
+              float distSq = dx * dx + dy * dy + dz * dz;
+              if (distSq < closestDirtyDistSq) {
+                closestDirtyDistSq = distSq;
+                closestDirty = c;
+                closestDirtySy = sy;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (closestDirty) {
+      m_compileChunk = closestDirty;
+      m_compileSy = closestDirtySy;
+      m_compileStep = 1;
+      m_opaqueTess.begin(g_opaqueBuf[m_compileSy], MAX_VERTS_PER_SUB_CHUNK);
+      m_transTess.begin(g_transBuf[m_compileSy], MAX_VERTS_PER_SUB_CHUNK);
+      m_transFancyTess.begin(g_transFancyBuf[m_compileSy], MAX_VERTS_PER_SUB_CHUNK);
+      m_emitTess.begin(g_emitBuf[m_compileSy], MAX_VERTS_PER_SUB_CHUNK);
+    }
+  }
+
+  if (m_compileStep >= 1 && m_compileStep <= 4) {
+    // Compile exactly 4 Y-layers per frame (1/4th of a subchunk, 1024 blocks max)
+    int slice = m_compileStep - 1;
+    int yStart = m_compileSy * 16 + slice * 4;
+    int yEnd = yStart + 4;
+
+    TileRenderer tileRenderer(m_level, &m_opaqueTess, &m_transTess, &m_transFancyTess, &m_emitTess);
+    for (int lx = 0; lx < CHUNK_SIZE_X; lx++) {
+      for (int lz = 0; lz < CHUNK_SIZE_Z; lz++) {
+        for (int ly = yStart; ly < yEnd; ly++) {
+          uint8_t id = m_compileChunk->blocks[lx][lz][ly];
+          if (id == BLOCK_AIR)
+            continue;
+
+          const BlockProps &bp = g_blockProps[id];
+          if (!bp.isSolid() && !bp.isTransparent() && !bp.isLiquid())
+            continue;
+
+          tileRenderer.tesselateBlockInWorld(id, lx, ly, lz, m_compileChunk->cx, m_compileChunk->cz);
+        }
+      }
+    }
+    m_compileStep++;
+  } else if (m_compileStep == 5) {
+    Chunk* c = m_compileChunk;
+    int sy = m_compileSy;
+
+    c->dirty[sy] = false;
+
+    c->opaqueTriCount[sy] = m_opaqueTess.end();
+    c->transTriCount[sy] = m_transTess.end();
+    c->transFancyTriCount[sy] = m_transFancyTess.end();
+
+    // Opaque Buffer
+    if (c->opaqueTriCount[sy] > 0) {
+      if (c->opaqueTriCount[sy] > c->opaqueCapacity[sy]) {
+        if (c->opaqueVertices[sy]) free(c->opaqueVertices[sy]);
+        c->opaqueCapacity[sy] = c->opaqueTriCount[sy] + 250; 
+        c->opaqueVertices[sy] = (CraftPSPVertex *)memalign(16, c->opaqueCapacity[sy] * sizeof(CraftPSPVertex));
+      }
+      if (c->opaqueVertices[sy]) {
+        memcpy(c->opaqueVertices[sy], g_opaqueBuf[sy], c->opaqueTriCount[sy] * sizeof(CraftPSPVertex));
+        sceKernelDcacheWritebackInvalidateRange(c->opaqueVertices[sy], c->opaqueTriCount[sy] * sizeof(CraftPSPVertex));
+      } else {
+        c->opaqueTriCount[sy] = 0;
+        c->opaqueCapacity[sy] = 0;
+      }
+    }
+
+    // Transparent Buffer (Outer Leaves, Glass, Water)
+    if (c->transTriCount[sy] > 0) {
+      if (c->transTriCount[sy] > c->transCapacity[sy]) {
+        if (c->transVertices[sy]) free(c->transVertices[sy]);
+        c->transCapacity[sy] = c->transTriCount[sy] + 250;
+        c->transVertices[sy] = (CraftPSPVertex *)memalign(16, c->transCapacity[sy] * sizeof(CraftPSPVertex));
+      }
+      if (c->transVertices[sy]) {
+        memcpy(c->transVertices[sy], g_transBuf[sy], c->transTriCount[sy] * sizeof(CraftPSPVertex));
+        sceKernelDcacheWritebackInvalidateRange(c->transVertices[sy], c->transTriCount[sy] * sizeof(CraftPSPVertex));
+      } else {
+        c->transTriCount[sy] = 0;
+        c->transCapacity[sy] = 0;
+      }
+    }
+
+    // Transparent FANCY Buffer (Inner Leaves)
+    if (c->transFancyTriCount[sy] > 0) {
+      if (c->transFancyTriCount[sy] > c->transFancyCapacity[sy]) {
+        if (c->transFancyVertices[sy]) free(c->transFancyVertices[sy]);
+        c->transFancyCapacity[sy] = c->transFancyTriCount[sy] + 250;
+        c->transFancyVertices[sy] = (CraftPSPVertex *)memalign(16, c->transFancyCapacity[sy] * sizeof(CraftPSPVertex));
+      }
+      if (c->transFancyVertices[sy]) {
+        memcpy(c->transFancyVertices[sy], g_transFancyBuf[sy], c->transFancyTriCount[sy] * sizeof(CraftPSPVertex));
+        sceKernelDcacheWritebackInvalidateRange(c->transFancyVertices[sy], c->transFancyTriCount[sy] * sizeof(CraftPSPVertex));
+      } else {
+        c->transFancyTriCount[sy] = 0;
+        c->transFancyCapacity[sy] = 0;
+      }
+    }
+
+    // Emit (block-lit) Buffer
+    c->emitTriCount[sy] = m_emitTess.end();
+    if (c->emitTriCount[sy] > 0) {
+      if (c->emitTriCount[sy] > c->emitCapacity[sy]) {
+        if (c->emitVertices[sy]) free(c->emitVertices[sy]);
+        c->emitCapacity[sy] = c->emitTriCount[sy] + 100;
+        c->emitVertices[sy] = (CraftPSPVertex *)memalign(16, c->emitCapacity[sy] * sizeof(CraftPSPVertex));
+      }
+      if (c->emitVertices[sy]) {
+        memcpy(c->emitVertices[sy], g_emitBuf[sy], c->emitTriCount[sy] * sizeof(CraftPSPVertex));
+        sceKernelDcacheWritebackInvalidateRange(c->emitVertices[sy], c->emitTriCount[sy] * sizeof(CraftPSPVertex));
+      } else {
+        c->emitTriCount[sy] = 0;
+        c->emitCapacity[sy] = 0;
+      }
+    }
+
+    m_compileStep = 0;
+    m_compileChunk = nullptr;
+  }
+}
+
+void ChunkRenderer::render(float camX, float camY, float camZ) {
+  if (!m_level)
+    return;
+
+  m_atlas->bind();
+
+  ScePspFMatrix4 vp;
+  PSPRenderer_GetViewProjMatrix(&vp);
+  Frustum frustum;
+  frustum.update(vp);
+
+  static const float RENDER_DISTANCE = 64.0f;
+  // Dynamic Leaf LOD: Only draw interior leaf faces if within 32 blocks (2 chunks radius)
+  static const float FANCY_LOD_DIST = 32.0f; 
+
+  int rebuildsThisFrame = 0;
+
+  struct RenderChunk {
+    Chunk *chunk;
+    int subChunkIdx;
+    float distSq;
+    float distSqHoriz;
+  };
+  RenderChunk visibleChunks[WORLD_CHUNKS_X * WORLD_CHUNKS_Z * 4];
+  int visibleCount = 0;
+
+  // Advance background meshing state-machine exactly 1 step per frame
+  processCompileQueue(camX, camY, camZ);
+
+  // Render loop
+  for (int cx = 0; cx < WORLD_CHUNKS_X; cx++) {
+    for (int cz = 0; cz < WORLD_CHUNKS_Z; cz++) {
+      Chunk *c = m_level->getChunk(cx, cz);
+      if (!c)
+        continue;
+
+      for (int sy = 0; sy < 4; sy++) {
+        if ((c->opaqueTriCount[sy] == 0 && c->transTriCount[sy] == 0 && c->transFancyTriCount[sy] == 0) ||
+            (!c->opaqueVertices[sy] && !c->transVertices[sy] && !c->transFancyVertices[sy]))
+          continue;
+
+        float chunkCenterX = c->cx * CHUNK_SIZE_X + CHUNK_SIZE_X / 2.0f;
+        float chunkCenterZ = c->cz * CHUNK_SIZE_Z + CHUNK_SIZE_Z / 2.0f;
+        float chunkCenterY = sy * 16 + 8.0f;
+
+        float dx = chunkCenterX - camX;
+        float dy = chunkCenterY - camY;
+        float dz = chunkCenterZ - camZ;
+        
+        // Horizontal distance culling 
+        float distSqHoriz = dx * dx + dz * dz;
+        if (distSqHoriz > RENDER_DISTANCE * RENDER_DISTANCE)
+          continue;
+
+        // 3D Distance for sorting (Depth testing hardware optimization)
+        float distSq = dx * dx + dy * dy + dz * dz;
+
+        AABB box;
+        box.minX = c->cx * CHUNK_SIZE_X;
+        box.minY = sy * 16;
+        box.minZ = c->cz * CHUNK_SIZE_Z;
+        box.maxX = box.minX + CHUNK_SIZE_X;
+        box.maxY = box.minY + 16;
+        box.maxZ = box.minZ + CHUNK_SIZE_Z;
+
+        // 3D Cubic Frustum Culling
+        if (frustum.testAABB(box) == Frustum::OUTSIDE)
+          continue;
+
+        visibleChunks[visibleCount].chunk = c;
+        visibleChunks[visibleCount].subChunkIdx = sy;
+        visibleChunks[visibleCount].distSq = distSq;
+        visibleChunks[visibleCount].distSqHoriz = distSqHoriz;
+        visibleCount++;
+      }
+    }
+  }
+
+  // Sort visible chunks Front-to-Back to maximize hardware Early-Z Rejection
+  for (int i = 0; i < visibleCount - 1; i++) {
+    for (int j = 0; j < visibleCount - i - 1; j++) {
+      if (visibleChunks[j].distSq > visibleChunks[j + 1].distSq) {
+        RenderChunk temp = visibleChunks[j];
+        visibleChunks[j] = visibleChunks[j + 1];
+        visibleChunks[j + 1] = temp;
+      }
+    }
+  }
+
+  // Draw Opaque Chunks – dimmed by current sun brightness via PSP Hardware Ambient Light
+  // sceGuAmbient scales ALL vertex colors uniformly, so zero chunk rebuilds are needed
+  // for day/night transitions. All chunks immediately show correct brightness.
+  float sunBr = m_level->getSunBrightness();
+  uint8_t sunByte = (uint8_t)(sunBr * 0.85f * 255.0f + 0.15f * 255.0f); // [0.15, 1.0]
+  uint32_t sunAmbient = (0xFF000000u) | ((uint32_t)sunByte << 16) | ((uint32_t)sunByte << 8) | sunByte;
+
+  sceGuDisable(GU_ALPHA_TEST);
+  sceGuDisable(GU_BLEND);
+  sceGuEnable(GU_LIGHTING);
+  sceGuAmbient(sunAmbient);
+
+  for (int i = 0; i < visibleCount; i++) {
+    Chunk *c = visibleChunks[i].chunk;
+    int sy = visibleChunks[i].subChunkIdx;
+    if (c->opaqueTriCount[sy] == 0 || !c->opaqueVertices[sy]) continue;
+    sceGumMatrixMode(GU_MODEL);
+    sceGumLoadIdentity();
+    sceGumDrawArray(GU_TRIANGLES,
+                    GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
+                    c->opaqueTriCount[sy], nullptr, c->opaqueVertices[sy]);
+  }
+
+  // Draw Emissive (Block-lit / Torch) Chunks – always full brightness regardless of time
+  sceGuAmbient(0xFFFFFFFF);
+  for (int i = 0; i < visibleCount; i++) {
+    Chunk *c = visibleChunks[i].chunk;
+    int sy = visibleChunks[i].subChunkIdx;
+    if (c->emitTriCount[sy] == 0 || !c->emitVertices[sy]) continue;
+    sceGumMatrixMode(GU_MODEL);
+    sceGumLoadIdentity();
+    sceGumDrawArray(GU_TRIANGLES,
+                    GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
+                    c->emitTriCount[sy], nullptr, c->emitVertices[sy]);
+  }
+
+  sceGuDisable(GU_LIGHTING);
+
+  // Draw Transparent FANCY Chunks (Inner Leaves LOD)
+  // Re-apply sun ambient so leaves darken at night too
+  sceGuEnable(GU_LIGHTING);
+  sceGuAmbient(sunAmbient);
+  sceGuEnable(GU_ALPHA_TEST);
+  sceGuEnable(GU_BLEND);
+  for (int i = 0; i < visibleCount; i++) {
+    Chunk *c = visibleChunks[i].chunk;
+    int sy = visibleChunks[i].subChunkIdx;
+    if (c->transFancyTriCount[sy] == 0 || !c->transFancyVertices[sy]) continue;
+    float distSqHoriz = visibleChunks[i].distSqHoriz;
+    if (distSqHoriz > FANCY_LOD_DIST * FANCY_LOD_DIST || camY > 80.0f) continue;
+    sceGumMatrixMode(GU_MODEL);
+    sceGumLoadIdentity();
+    sceGumDrawArray(GU_TRIANGLES,
+                    GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
+                    c->transFancyTriCount[sy], nullptr, c->transFancyVertices[sy]);
+  }
+
+  // Draw Transparent Chunks (Outer leaves, glass, water)
+  for (int i = 0; i < visibleCount; i++) {
+    Chunk *c = visibleChunks[i].chunk;
+    int sy = visibleChunks[i].subChunkIdx;
+    if (c->transTriCount[sy] == 0 || !c->transVertices[sy]) continue;
+    sceGumMatrixMode(GU_MODEL);
+    sceGumLoadIdentity();
+    sceGumDrawArray(GU_TRIANGLES,
+                    GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
+                    c->transTriCount[sy], nullptr, c->transVertices[sy]);
+  }
+
+  sceGuDisable(GU_LIGHTING); // Restore default state
+}

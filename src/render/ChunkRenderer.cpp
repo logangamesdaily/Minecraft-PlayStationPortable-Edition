@@ -1,3 +1,4 @@
+// ChunkRenderer.cpp
 #include "ChunkRenderer.h"
 #include "../math/Frustum.h"
 #include "PSPRenderer.h"
@@ -14,21 +15,36 @@
 static CraftPSPVertex g_opaqueBuf[4][MAX_VERTS_PER_SUB_CHUNK];
 static CraftPSPVertex g_transBuf[4][MAX_VERTS_PER_SUB_CHUNK];
 static CraftPSPVertex g_transFancyBuf[4][MAX_VERTS_PER_SUB_CHUNK];
-static CraftPSPVertex g_emitBuf[4][MAX_VERTS_PER_SUB_CHUNK]; // Block-lit (torch) faces
+static CraftPSPVertex g_emitBuf[4][MAX_VERTS_PER_SUB_CHUNK];
 
 ChunkRenderer::ChunkRenderer(TextureAtlas *atlas)
-    : m_atlas(atlas), m_level(nullptr), m_compileStep(0), m_compileChunk(nullptr), m_compileSy(-1) {}
+    : m_level(nullptr), m_atlas(atlas), m_compileStep(0), m_compileChunk(nullptr), m_compileSy(-1) {}
 
 ChunkRenderer::~ChunkRenderer() {}
 
 void ChunkRenderer::setLevel(Level *level) { m_level = level; }
 
+#include <psprtc.h>
+
 void ChunkRenderer::processCompileQueue(float camX, float camY, float camZ) {
   if (!m_level)
     return;
 
+  // Limit compile time
+  uint64_t tickStart;
+  sceRtcGetCurrentTick(&tickStart);
+  uint32_t tickRes = sceRtcGetTickResolution();
+  
+  while (true) {
+    uint64_t currentTick;
+    sceRtcGetCurrentTick(&currentTick);
+    float elapsedMs = (float)(currentTick - tickStart) / ((float)tickRes / 1000.0f);
+    if (elapsedMs > 4.0f) {
+      break;
+    }
+
   if (m_compileStep == 0) {
-    // Find the single closest dirty chunk sub-volume to rebuild first!
+    // Find closest dirty subchunk
     Chunk *closestDirty = nullptr;
     int closestDirtySy = -1;
     float closestDirtyDistSq = 9999999.0f;
@@ -68,11 +84,10 @@ void ChunkRenderer::processCompileQueue(float camX, float camY, float camZ) {
     }
   }
 
-  if (m_compileStep >= 1 && m_compileStep <= 4) {
-    // Compile exactly 4 Y-layers per frame (1/4th of a subchunk, 1024 blocks max)
-    int slice = m_compileStep - 1;
-    int yStart = m_compileSy * 16 + slice * 4;
-    int yEnd = yStart + 4;
+  if (m_compileStep == 1) {
+    // Compile y-layers
+    int yStart = m_compileSy * 16;
+    int yEnd = yStart + 16;
 
     TileRenderer tileRenderer(m_level, &m_opaqueTess, &m_transTess, &m_transFancyTess, &m_emitTess);
     for (int lx = 0; lx < CHUNK_SIZE_X; lx++) {
@@ -90,8 +105,8 @@ void ChunkRenderer::processCompileQueue(float camX, float camY, float camZ) {
         }
       }
     }
-    m_compileStep++;
-  } else if (m_compileStep == 5) {
+    
+    // Upload immediately
     Chunk* c = m_compileChunk;
     int sy = m_compileSy;
 
@@ -149,7 +164,7 @@ void ChunkRenderer::processCompileQueue(float camX, float camY, float camZ) {
       }
     }
 
-    // Emit (block-lit) Buffer
+    // Emit buffer
     c->emitTriCount[sy] = m_emitTess.end();
     if (c->emitTriCount[sy] > 0) {
       if (c->emitTriCount[sy] > c->emitCapacity[sy]) {
@@ -169,6 +184,72 @@ void ChunkRenderer::processCompileQueue(float camX, float camY, float camZ) {
     m_compileStep = 0;
     m_compileChunk = nullptr;
   }
+  
+  // If there are no chunks to compile, exit the while loop early
+  if (m_compileStep == 0) {
+      break;
+  }
+  
+  } // end while(true)
+}
+
+// Finish tessellation and upload vertex data
+static void flushSubChunk(Chunk *c, int sy,
+                          Tesselator &opT, Tesselator &trT, Tesselator &tfT, Tesselator &emT) {
+  c->dirty[sy] = false;
+
+  c->opaqueTriCount[sy] = opT.end();
+  c->transTriCount[sy]  = trT.end();
+  c->transFancyTriCount[sy] = tfT.end();
+  c->emitTriCount[sy]   = emT.end();
+
+  auto upload = [](CraftPSPVertex *&buf, int &count, int &cap, CraftPSPVertex *src) {
+    if (count <= 0) return;
+    if (count > cap) {
+      if (buf) free(buf);
+      cap = count + 250;
+      buf = (CraftPSPVertex *)memalign(16, cap * sizeof(CraftPSPVertex));
+    }
+    if (buf) {
+      memcpy(buf, src, count * sizeof(CraftPSPVertex));
+      sceKernelDcacheWritebackInvalidateRange(buf, count * sizeof(CraftPSPVertex));
+    } else {
+      count = 0; cap = 0;
+    }
+  };
+  upload(c->opaqueVertices[sy],    c->opaqueTriCount[sy],    c->opaqueCapacity[sy],    g_opaqueBuf[sy]);
+  upload(c->transVertices[sy],     c->transTriCount[sy],     c->transCapacity[sy],     g_transBuf[sy]);
+  upload(c->transFancyVertices[sy],c->transFancyTriCount[sy],c->transFancyCapacity[sy],g_transFancyBuf[sy]);
+  upload(c->emitVertices[sy],      c->emitTriCount[sy],      c->emitCapacity[sy],      g_emitBuf[sy]);
+}
+
+void ChunkRenderer::rebuildChunkNow(int cx, int cz, int sy) {
+  if (!m_level) return;
+  Chunk *c = m_level->getChunk(cx, cz);
+  if (!c || sy < 0 || sy >= 4) return;
+
+  // Tessellate the full subchunk in one call
+  m_opaqueTess.begin(g_opaqueBuf[sy], MAX_VERTS_PER_SUB_CHUNK);
+  m_transTess.begin(g_transBuf[sy], MAX_VERTS_PER_SUB_CHUNK);
+  m_transFancyTess.begin(g_transFancyBuf[sy], MAX_VERTS_PER_SUB_CHUNK);
+  m_emitTess.begin(g_emitBuf[sy], MAX_VERTS_PER_SUB_CHUNK);
+
+  TileRenderer tileRenderer(m_level, &m_opaqueTess, &m_transTess, &m_transFancyTess, &m_emitTess);
+  int yStart = sy * 16;
+  int yEnd   = yStart + 16;
+  for (int lx = 0; lx < CHUNK_SIZE_X; lx++) {
+    for (int lz = 0; lz < CHUNK_SIZE_Z; lz++) {
+      for (int ly = yStart; ly < yEnd; ly++) {
+        uint8_t id = c->blocks[lx][lz][ly];
+        if (id == BLOCK_AIR) continue;
+        const BlockProps &bp = g_blockProps[id];
+        if (!bp.isSolid() && !bp.isTransparent() && !bp.isLiquid()) continue;
+        tileRenderer.tesselateBlockInWorld(id, lx, ly, lz, c->cx, c->cz);
+      }
+    }
+  }
+
+  flushSubChunk(c, sy, m_opaqueTess, m_transTess, m_transFancyTess, m_emitTess);
 }
 
 void ChunkRenderer::render(float camX, float camY, float camZ) {
@@ -183,10 +264,9 @@ void ChunkRenderer::render(float camX, float camY, float camZ) {
   frustum.update(vp);
 
   static const float RENDER_DISTANCE = 64.0f;
-  // Dynamic Leaf LOD: Only draw interior leaf faces if within 32 blocks (2 chunks radius)
   static const float FANCY_LOD_DIST = 32.0f; 
 
-  int rebuildsThisFrame = 0;
+
 
   struct RenderChunk {
     Chunk *chunk;
@@ -197,7 +277,7 @@ void ChunkRenderer::render(float camX, float camY, float camZ) {
   RenderChunk visibleChunks[WORLD_CHUNKS_X * WORLD_CHUNKS_Z * 4];
   int visibleCount = 0;
 
-  // Advance background meshing state-machine exactly 1 step per frame
+  // Process compile queue
   processCompileQueue(camX, camY, camZ);
 
   // Render loop
@@ -220,21 +300,21 @@ void ChunkRenderer::render(float camX, float camY, float camZ) {
         float dy = chunkCenterY - camY;
         float dz = chunkCenterZ - camZ;
         
-        // Horizontal distance culling 
+        // Distance culling
+        float maxDist = RENDER_DISTANCE + 11.5f;
         float distSqHoriz = dx * dx + dz * dz;
-        if (distSqHoriz > RENDER_DISTANCE * RENDER_DISTANCE)
+        if (distSqHoriz > maxDist * maxDist)
           continue;
 
-        // 3D Distance for sorting (Depth testing hardware optimization)
         float distSq = dx * dx + dy * dy + dz * dz;
 
         AABB box;
-        box.minX = c->cx * CHUNK_SIZE_X;
-        box.minY = sy * 16;
-        box.minZ = c->cz * CHUNK_SIZE_Z;
-        box.maxX = box.minX + CHUNK_SIZE_X;
-        box.maxY = box.minY + 16;
-        box.maxZ = box.minZ + CHUNK_SIZE_Z;
+        box.x0 = c->cx * CHUNK_SIZE_X - 1.0f;
+        box.y0 = sy * 16 - 1.0f;
+        box.z0 = c->cz * CHUNK_SIZE_Z - 1.0f;
+        box.x1 = box.x0 + CHUNK_SIZE_X + 2.0f;
+        box.y1 = box.y0 + 16 + 2.0f;
+        box.z1 = box.z0 + CHUNK_SIZE_Z + 2.0f;
 
         // 3D Cubic Frustum Culling
         if (frustum.testAABB(box) == Frustum::OUTSIDE)
@@ -249,7 +329,7 @@ void ChunkRenderer::render(float camX, float camY, float camZ) {
     }
   }
 
-  // Sort visible chunks Front-to-Back to maximize hardware Early-Z Rejection
+  // Sort visible chunks front-to-back
   for (int i = 0; i < visibleCount - 1; i++) {
     for (int j = 0; j < visibleCount - i - 1; j++) {
       if (visibleChunks[j].distSq > visibleChunks[j + 1].distSq) {
@@ -260,12 +340,19 @@ void ChunkRenderer::render(float camX, float camY, float camZ) {
     }
   }
 
-  // Draw Opaque Chunks – dimmed by current sun brightness via PSP Hardware Ambient Light
-  // sceGuAmbient scales ALL vertex colors uniformly, so zero chunk rebuilds are needed
-  // for day/night transitions. All chunks immediately show correct brightness.
+  // Draw opaque chunks
   float sunBr = m_level->getSunBrightness();
   uint8_t sunByte = (uint8_t)(sunBr * 0.85f * 255.0f + 0.15f * 255.0f); // [0.15, 1.0]
   uint32_t sunAmbient = (0xFF000000u) | ((uint32_t)sunByte << 16) | ((uint32_t)sunByte << 8) | sunByte;
+
+  // Helper: set model matrix to translate chunk-local vertices to world position
+  auto setChunkMatrix = [](Chunk *c) {
+    sceGumMatrixMode(GU_MODEL);
+    sceGumLoadIdentity();
+    ScePspFVector3 t = { (float)(c->cx * CHUNK_SIZE_X), 0.0f, (float)(c->cz * CHUNK_SIZE_Z) };
+    sceGumTranslate(&t);
+    sceGumUpdateMatrix();
+  };
 
   sceGuDisable(GU_ALPHA_TEST);
   sceGuDisable(GU_BLEND);
@@ -276,21 +363,19 @@ void ChunkRenderer::render(float camX, float camY, float camZ) {
     Chunk *c = visibleChunks[i].chunk;
     int sy = visibleChunks[i].subChunkIdx;
     if (c->opaqueTriCount[sy] == 0 || !c->opaqueVertices[sy]) continue;
-    sceGumMatrixMode(GU_MODEL);
-    sceGumLoadIdentity();
+    setChunkMatrix(c);
     sceGumDrawArray(GU_TRIANGLES,
                     GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
                     c->opaqueTriCount[sy], nullptr, c->opaqueVertices[sy]);
   }
 
-  // Draw Emissive (Block-lit / Torch) Chunks – always full brightness regardless of time
+  // Draw emissive chunks
   sceGuAmbient(0xFFFFFFFF);
   for (int i = 0; i < visibleCount; i++) {
     Chunk *c = visibleChunks[i].chunk;
     int sy = visibleChunks[i].subChunkIdx;
     if (c->emitTriCount[sy] == 0 || !c->emitVertices[sy]) continue;
-    sceGumMatrixMode(GU_MODEL);
-    sceGumLoadIdentity();
+    setChunkMatrix(c);
     sceGumDrawArray(GU_TRIANGLES,
                     GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
                     c->emitTriCount[sy], nullptr, c->emitVertices[sy]);
@@ -298,8 +383,7 @@ void ChunkRenderer::render(float camX, float camY, float camZ) {
 
   sceGuDisable(GU_LIGHTING);
 
-  // Draw Transparent FANCY Chunks (Inner Leaves LOD)
-  // Re-apply sun ambient so leaves darken at night too
+  // Draw inner leaves
   sceGuEnable(GU_LIGHTING);
   sceGuAmbient(sunAmbient);
   sceGuEnable(GU_ALPHA_TEST);
@@ -310,20 +394,18 @@ void ChunkRenderer::render(float camX, float camY, float camZ) {
     if (c->transFancyTriCount[sy] == 0 || !c->transFancyVertices[sy]) continue;
     float distSqHoriz = visibleChunks[i].distSqHoriz;
     if (distSqHoriz > FANCY_LOD_DIST * FANCY_LOD_DIST || camY > 80.0f) continue;
-    sceGumMatrixMode(GU_MODEL);
-    sceGumLoadIdentity();
+    setChunkMatrix(c);
     sceGumDrawArray(GU_TRIANGLES,
                     GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
                     c->transFancyTriCount[sy], nullptr, c->transFancyVertices[sy]);
   }
 
-  // Draw Transparent Chunks (Outer leaves, glass, water)
+  // Draw transparent chunks
   for (int i = 0; i < visibleCount; i++) {
     Chunk *c = visibleChunks[i].chunk;
     int sy = visibleChunks[i].subChunkIdx;
     if (c->transTriCount[sy] == 0 || !c->transVertices[sy]) continue;
-    sceGumMatrixMode(GU_MODEL);
-    sceGumLoadIdentity();
+    setChunkMatrix(c);
     sceGumDrawArray(GU_TRIANGLES,
                     GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
                     c->transTriCount[sy], nullptr, c->transVertices[sy]);

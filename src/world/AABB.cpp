@@ -1,6 +1,4 @@
-// AABB.cpp - Axis-Aligned Bounding Box
-// Adapted from Minecraft.World/AABB.cpp (4J Studios, 2014)
-// Simplified: removed TLS, removed wstring
+// AABB.cpp
 
 #include "AABB.h"
 #include "Vec3.h"

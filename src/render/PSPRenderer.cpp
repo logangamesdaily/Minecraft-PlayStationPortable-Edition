@@ -8,6 +8,7 @@
 #include <pspgum.h>
 #include <pspkernel.h>
 #include <string.h>
+#include <math.h>
 
 #define BUF_WIDTH 512
 #define SCR_WIDTH 480
@@ -41,14 +42,11 @@ bool PSPRenderer_Init() {
   sceGuDepthBuffer((void *)(2 * 512 * 272 * 4), BUF_WIDTH);
 
   sceGuOffset(2048 - (SCR_WIDTH / 2), 2048 - (SCR_HEIGHT / 2));
-  // Overscan hack: Add 4 pixels to viewport to hide rasterizer gaps at the
-  // screen edge
-  sceGuViewport(2048, 2048, SCR_WIDTH + 4, SCR_HEIGHT + 4);
-  sceGuDepthRange(
-      50000,
-      10000); // Salvarea hardware clipper-ului de la overflow (Lamecraft hack)
+  // Match Revival: no overscan, exact screen dimensions
+  sceGuViewport(2048, 2048, SCR_WIDTH, SCR_HEIGHT);
+  // Standard hardware clip depth mapping
+  sceGuDepthRange(65535, 0);
 
-  // ScissorJKSFJKFDJKFDSJKFDJK
   sceGuScissor(0, 0, SCR_WIDTH, SCR_HEIGHT);
   sceGuEnable(GU_SCISSOR_TEST);
 
@@ -61,23 +59,19 @@ bool PSPRenderer_Init() {
   sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA); // vertex color * texture = final
   sceGuTexFilter(GU_NEAREST, GU_NEAREST);     // pixel-art style
 
-  // Smooth Shading for Ambient Occlusion
+  // Smooth shading
   sceGuShadeModel(GU_SMOOTH);
 
-  // Hardware clipping for triangles passing the screen edge
-  // Prevents entire cubes from disappearing when close to a corner
   sceGuEnable(GU_CLIP_PLANES);
 
-  // Backface culling
-  sceGuFrontFace(GU_CCW);
-  sceGuEnable(GU_CULL_FACE);
+  // Backface culling off
+  sceGuDisable(GU_CULL_FACE);
 
   // Alpha test (for plants/transparents)
   sceGuAlphaFunc(GU_GREATER, 0x80, 0xFF);
   sceGuEnable(GU_ALPHA_TEST);
 
-  // Fog: Minecraft blue color, distance 40-64 blocks
-  sceGuFog(40.0f, 64.0f, 0xFFFFB267); // ABGR: R=0x67,G=0xB2,B=0xFF -> sky blue
+  sceGuFog(32.0f, 64.0f, 0xFFFFB267);
   sceGuEnable(GU_FOG);
 
   sceGuFinish();
@@ -92,18 +86,17 @@ bool PSPRenderer_Init() {
 void PSPRenderer_BeginFrame(uint32_t skyColor) {
   sceGuStart(GU_DIRECT, g_list);
 
-  // Clear to dynamic sky color (updated per-frame by SkyRenderer)
+  // Clear to sky color
   sceGuClearColor(skyColor);
   sceGuClearDepth(0);
   sceGuClear(GU_COLOR_BUFFER_BIT | GU_DEPTH_BUFFER_BIT);
 
   // Update fog to match sky color dynamically
-  sceGuFog(40.0f, 64.0f, skyColor);
+  sceGuFog(32.0f, 64.0f, skyColor);
 
-  // Projection matrix
   sceGumMatrixMode(GU_PROJECTION);
   sceGumLoadIdentity();
-  sceGumPerspective(70.0f, 480.0f / 272.0f, 0.21f, 1000.0f);
+  sceGumPerspective(70.0f, 480.0f / 272.0f, 0.1f, 1000.0f);
 
   sceGumMatrixMode(GU_VIEW);
   sceGumLoadIdentity();
@@ -117,11 +110,9 @@ void PSPRenderer_SetCamera(const ScePspFVector3 *eye,
   sceGumMatrixMode(GU_VIEW);
   sceGumLoadIdentity();
   ScePspFVector3 up = {0.0f, 1.0f, 0.0f};
-  // sceGumLookAt does not accept const - const_cast required
   sceGumLookAt(const_cast<ScePspFVector3 *>(eye),
                const_cast<ScePspFVector3 *>(center), &up);
-  sceGumUpdateMatrix(); // IMPORTANT: This ensures the view matrix is
-                        // mathematically updated before we read it!
+  sceGumUpdateMatrix();
   sceGumMatrixMode(GU_MODEL);
 }
 

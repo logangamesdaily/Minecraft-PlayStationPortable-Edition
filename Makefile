@@ -22,6 +22,7 @@ SRCS = src/main.cpp \
        src/world/WorldGen.cpp \
        src/world/Chunk.cpp \
        src/world/Level.cpp \
+       src/world/Raycast.cpp \
        src/render/PSPRenderer.cpp \
        src/render/ChunkRenderer.cpp \
        src/render/TextureAtlas.cpp \
@@ -29,6 +30,7 @@ SRCS = src/main.cpp \
        src/render/TileRenderer.cpp \
        src/render/SkyRenderer.cpp \
        src/render/CloudRenderer.cpp \
+       src/render/BlockHighlight.cpp \
        src/math/Frustum.cpp \
        src/input/PSPInput.cpp
 

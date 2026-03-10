@@ -10,14 +10,18 @@
 #include <psppower.h>
 
 #include "input/PSPInput.h"
+#include "render/BlockHighlight.h"
 #include "render/ChunkRenderer.h"
 #include "render/CloudRenderer.h"
+#include "world/Level.h"
+#include "world/AABB.h"
 #include "render/PSPRenderer.h"
 #include "render/SkyRenderer.h"
 #include "render/TextureAtlas.h"
 #include "world/Blocks.h"
 #include "world/Mth.h"
 #include "world/Random.h"
+#include "world/Raycast.h"
 #include <math.h>
 
 // PSP module metadata
@@ -45,9 +49,7 @@ void setup_callbacks() {
     sceKernelStartThread(thid, 0, NULL);
 }
 
-// ====================================================
-// Simple player state
-// ====================================================
+// Player state
 struct PlayerState {
   float x, y, z;          // position
   float yaw, pitch;       // camera rotation (degrees)
@@ -57,19 +59,17 @@ struct PlayerState {
   float jumpDoubleTapTimer; // countdown for double-tap detection
 };
 
-// ====================================================
-// Game state global
-// ====================================================
+// Global state
 static PlayerState g_player;
 static Level *g_level = nullptr;
 static SkyRenderer *g_skyRenderer = nullptr;
 static CloudRenderer *g_cloudRenderer = nullptr;
 static ChunkRenderer *g_chunkRenderer = nullptr;
 static TextureAtlas *g_atlas = nullptr;
+static RayHit g_hitResult;       // Block the player is currently looking at
+static uint8_t g_heldBlock = BLOCK_COBBLESTONE; // Block to place
 
-// ====================================================
-// Init
-// ====================================================
+// Initialization
 static bool game_init() {
   // Overclock PSP to max for performance
   scePowerSetClockFrequency(333, 333, 166);
@@ -115,9 +115,7 @@ static bool game_init() {
   return true;
 }
 
-// ====================================================
-// Game Loop
-// ====================================================
+// Game loop update
 static void game_update(float dt) {
   PSPInput_Update();
   if (g_level) {
@@ -143,150 +141,69 @@ static void game_update(float dt) {
   float dx = (fx * Mth::cos(yawRad) + fz * Mth::sin(yawRad)) * moveSpeed;
   float dz = (-fx * Mth::sin(yawRad) + fz * Mth::cos(yawRad)) * moveSpeed;
 
-  const float R = 0.4f;
-  const float H = 1.75f;
+  const float R = 0.3f;   // 4J: setSize(0.6, 1.8)
+  const float H = 1.8f;   // 4J: player bounding box height
 
-  auto isSolid = [&](float px, float py, float pz) -> bool {
-    int bx = (int)px, by = (int)py, bz = (int)pz;
-    if (bx < 0 || bx >= WORLD_CHUNKS_X * CHUNK_SIZE_X)
-      return false;
-    if (bz < 0 || bz >= WORLD_CHUNKS_Z * CHUNK_SIZE_Z)
-      return false;
-    if (by < 0 || by >= CHUNK_SIZE_Y)
-      return false;
-    return g_blockProps[g_level->getBlock(bx, by, bz)].isSolid();
-  };
-
-  // X collision - check at z-R, z-center, z+R (AABB corners)
-  g_player.x += dx;
-  {
-    float cx = (dx > 0) ? g_player.x + R : g_player.x - R;
-    bool hitX = false;
-    for (int yi = 0; yi < 3 && !hitX; yi++) {
-      float cy = g_player.y + (yi == 0 ? 0.05f : yi == 1 ? 0.9f : H);
-      if (isSolid(cx, cy, g_player.z - R) || isSolid(cx, cy, g_player.z) ||
-          isSolid(cx, cy, g_player.z + R))
-        hitX = true;
-    }
-    if (hitX) {
-      // FIX CRITIC: Pushes the player back exactly at R distance from the
-      // block!
-      if (dx > 0) {
-        g_player.x = floorf(g_player.x + R) - R - 0.001f;
-      } else {
-        g_player.x = ceilf(g_player.x - R) + R + 0.001f;
-      }
-    }
-  }
-
-  // Z collision - check at x-R, x-center, x+R (AABB corners)
-  g_player.z += dz;
-  {
-    float cz = (dz > 0) ? g_player.z + R : g_player.z - R;
-    bool hitZ = false;
-    for (int yi = 0; yi < 3 && !hitZ; yi++) {
-      float cy = g_player.y + (yi == 0 ? 0.05f : yi == 1 ? 0.9f : H);
-      if (isSolid(g_player.x - R, cy, cz) || isSolid(g_player.x, cy, cz) ||
-          isSolid(g_player.x + R, cy, cz))
-        hitZ = true;
-    }
-    if (hitZ) {
-      // FIX CRITIC: Pushes the player back exactly at R distance from the
-      // block!
-      if (dz > 0) {
-        g_player.z = floorf(g_player.z + R) - R - 0.001f;
-      } else {
-        g_player.z = ceilf(g_player.z - R) + R + 0.001f;
-      }
-    }
-  }
-
-  // ── Fly mode vertical movement ──────────────────────────────────────────
+  // Vertical movement
+  float dy = 0.0f;
   if (g_player.isFlying) {
     float flySpeed = 10.0f * dt;
-    if (PSPInput_IsHeld(PSP_CTRL_RTRIGGER))
-      g_player.y += flySpeed;  // Ascend
-    if (PSPInput_IsHeld(PSP_CTRL_LTRIGGER))
-      g_player.y -= flySpeed;  // Descend
-    g_player.velY = 0.0f;      // No gravity while flying
-  } else if (!g_player.onGround) {
-    // Normal gravity
+    if (PSPInput_IsHeld(PSP_CTRL_SELECT))
+      dy = flySpeed;  // Ascend
+    if (PSPInput_IsHeld(PSP_CTRL_DOWN))
+      dy = -flySpeed;  // Descend
+    g_player.velY = 0.0f;
+  } else {
     g_player.velY -= 20.0f * dt;
-    g_player.y += g_player.velY * dt;
+    dy = g_player.velY * dt;
   }
 
-  // Vertical collision: ground + ceiling
-  // Check all 4 AABB corners on X/Z
-  {
-    const float WORLD_MAX_X = (float)(WORLD_CHUNKS_X * CHUNK_SIZE_X - 1);
-    const float WORLD_MAX_Z = (float)(WORLD_CHUNKS_Z * CHUNK_SIZE_Z - 1);
+  // Collision
+  AABB player_aabb(g_player.x - R, g_player.y, g_player.z - R,
+                   g_player.x + R, g_player.y + H, g_player.z + R);
 
-    if (g_player.x < 0.5f)
-      g_player.x = 0.5f;
-    if (g_player.x > WORLD_MAX_X)
-      g_player.x = WORLD_MAX_X;
-    if (g_player.z < 0.5f)
-      g_player.z = 0.5f;
-    if (g_player.z > WORLD_MAX_Z)
-      g_player.z = WORLD_MAX_Z;
+  AABB* expanded = player_aabb.expand(dx, dy, dz);
+  std::vector<AABB> cubes = g_level->getCubes(*expanded);
+  delete expanded;
 
-    // GROUND collision (velY <= 0): search block below feet
-    if (g_player.velY <= 0.0f) {
-      // Test the 4 corners of the box
-      int byFoot = (int)(g_player.y - 0.01f);
-      if (byFoot < 0)
-        byFoot = 0;
-      bool hitFloor = false;
-      float corners[4][2] = {{g_player.x - R, g_player.z - R},
-                             {g_player.x + R, g_player.z - R},
-                             {g_player.x - R, g_player.z + R},
-                             {g_player.x + R, g_player.z + R}};
-      for (int ci = 0; ci < 4 && !hitFloor; ci++) {
-        if (isSolid(corners[ci][0], (float)byFoot, corners[ci][1]))
-          hitFloor = true;
-      }
-      if (hitFloor) {
-        g_player.y = (float)(byFoot + 1);
-        g_player.velY = 0.0f;
-        g_player.onGround = true;
-      } else {
-        g_player.onGround = false;
-      }
-    } else {
-      // CEILING collision (velY > 0): head is at g_player.y + H
-      float headY = g_player.y + H;
-      int byCeil = (int)headY;
-      bool hitCeil = false;
-      float corners[4][2] = {{g_player.x - R, g_player.z - R},
-                             {g_player.x + R, g_player.z - R},
-                             {g_player.x - R, g_player.z + R},
-                             {g_player.x + R, g_player.z + R}};
-      for (int ci = 0; ci < 4 && !hitCeil; ci++) {
-        if (isSolid(corners[ci][0], (float)byCeil, corners[ci][1]))
-          hitCeil = true;
-      }
-      if (hitCeil) {
-        // Head hit - stop ascent instantly and snap below the block
-        g_player.y = (float)byCeil - H - 0.01f;
-        g_player.velY = 0.0f;
-      }
-      g_player.onGround = false;
-    }
+  float dy_org = dy;
+  for (auto& cube : cubes) dy = cube.clipYCollide(&player_aabb, dy);
+  player_aabb.move(0, dy, 0);
+
+  for (auto& cube : cubes) dx = cube.clipXCollide(&player_aabb, dx);
+  player_aabb.move(dx, 0, 0);
+
+  for (auto& cube : cubes) dz = cube.clipZCollide(&player_aabb, dz);
+  player_aabb.move(0, 0, dz);
+
+  g_player.onGround = (dy_org != dy && dy_org < 0.0f);
+  if (g_player.onGround || dy_org != dy) {
+    g_player.velY = 0.0f;
   }
 
-  // ── Double-tap R-Trigger to toggle fly (Revival-style) ──────────────────
+  g_player.x = (player_aabb.x0 + player_aabb.x1) / 2.0f;
+  g_player.y = player_aabb.y0;
+  g_player.z = (player_aabb.z0 + player_aabb.z1) / 2.0f;
+
+  // Enforce world bounds natively
+  const float WORLD_MAX_X = (float)(WORLD_CHUNKS_X * CHUNK_SIZE_X - 1);
+  const float WORLD_MAX_Z = (float)(WORLD_CHUNKS_Z * CHUNK_SIZE_Z - 1);
+  if (g_player.x < 0.5f) g_player.x = 0.5f;
+  if (g_player.x > WORLD_MAX_X) g_player.x = WORLD_MAX_X;
+  if (g_player.z < 0.5f) g_player.z = 0.5f;
+  if (g_player.z > WORLD_MAX_Z) g_player.z = WORLD_MAX_Z;
+
+  // Controls: Jump/Fly
   static const float DOUBLE_TAP_WINDOW = 0.35f;
   if (g_player.jumpDoubleTapTimer > 0.0f)
     g_player.jumpDoubleTapTimer -= dt;
 
-  if (PSPInput_JustPressed(PSP_CTRL_RTRIGGER)) {
+  if (PSPInput_JustPressed(PSP_CTRL_SELECT)) {
     if (g_player.jumpDoubleTapTimer > 0.0f) {
-      // Second tap within 0.35s → TOGGLE fly mode (enter or exit)
       g_player.isFlying = !g_player.isFlying;
       g_player.velY = 0.0f;
       g_player.jumpDoubleTapTimer = 0.0f;
     } else {
-      // First tap: normal jump (if on ground and not flying), start double-tap window
       if (!g_player.isFlying && g_player.onGround) {
         g_player.velY = 6.5f;
         g_player.onGround = false;
@@ -294,13 +211,157 @@ static void game_update(float dt) {
       g_player.jumpDoubleTapTimer = DOUBLE_TAP_WINDOW;
     }
   }
+
+  // Raycast block target
+  {
+    float eyeX = g_player.x;
+    float eyeY = g_player.y + 1.6f;
+    float eyeZ = g_player.z;
+    float pitchRad = g_player.pitch * Mth::DEGRAD;
+    float dirX = Mth::sin(yawRad) * Mth::cos(pitchRad);
+    float dirY = Mth::sin(pitchRad);
+    float dirZ = Mth::cos(yawRad) * Mth::cos(pitchRad);
+    g_hitResult = raycast(g_level, eyeX, eyeY, eyeZ, dirX, dirY, dirZ, 5.0f);
+  }
+
+  // Block action cooldown
+  static float breakCooldown = 0.0f;
+  if (breakCooldown > 0.0f) breakCooldown -= dt;
+
+  // Block breaking
+  bool doBreak = false;
+  if (PSPInput_IsHeld(PSP_CTRL_LTRIGGER) && breakCooldown <= 0.0f) {
+    doBreak = true;
+    breakCooldown = 0.15f;
+  }
+
+  if (doBreak && g_hitResult.hit) {
+    uint8_t oldBlock = g_level->getBlock(g_hitResult.x, g_hitResult.y, g_hitResult.z);
+    if (oldBlock != BLOCK_BEDROCK) {
+      int bx = g_hitResult.x, by = g_hitResult.y, bz = g_hitResult.z;
+      g_level->setBlock(bx, by, bz, BLOCK_AIR);
+      g_level->markDirty(bx, by, bz);
+
+      // Cascading plant break (if we broke the soil, the plant pops off)
+      uint8_t topId = g_level->getBlock(bx, by + 1, bz);
+      if (topId != BLOCK_AIR && !g_blockProps[topId].isSolid() && !g_blockProps[topId].isLiquid()) {
+          g_level->setBlock(bx, by + 1, bz, BLOCK_AIR);
+          g_level->markDirty(bx, by + 1, bz);
+          g_chunkRenderer->rebuildChunkNow(bx >> 4, bz >> 4, (by + 1) >> 4);
+      }
+
+      // Rebuild the central chunk synchronously
+      int cx = bx >> 4, cz = bz >> 4, sy = by >> 4;
+      g_chunkRenderer->rebuildChunkNow(cx, cz, sy);
+      
+      // Rebuild neighbor chunks
+      if ((bx & 0xF) == 0  && cx > 0)
+        g_chunkRenderer->rebuildChunkNow(cx - 1, cz, sy);
+      if ((bx & 0xF) == 15 && cx < WORLD_CHUNKS_X - 1)
+        g_chunkRenderer->rebuildChunkNow(cx + 1, cz, sy);
+      if ((bz & 0xF) == 0  && cz > 0)
+        g_chunkRenderer->rebuildChunkNow(cx, cz - 1, sy);
+      if ((bz & 0xF) == 15 && cz < WORLD_CHUNKS_Z - 1)
+        g_chunkRenderer->rebuildChunkNow(cx, cz + 1, sy);
+      if ((by & 0xF) == 0  && sy > 0)
+        g_chunkRenderer->rebuildChunkNow(cx, cz, sy - 1);
+      if ((by & 0xF) == 15 && sy < 3)
+        g_chunkRenderer->rebuildChunkNow(cx, cz, sy + 1);
+    }
+  }
+
+  // Place block
+  if (PSPInput_JustPressed(PSP_CTRL_UP) && g_hitResult.hit) {
+    int px = g_hitResult.nx;
+    int py = g_hitResult.ny;
+    int pz = g_hitResult.nz;
+
+    // If we click on a plant, replace the plant directly instead of placing adjacent
+    uint8_t hitId = g_level->getBlock(g_hitResult.x, g_hitResult.y, g_hitResult.z);
+    if (hitId != BLOCK_AIR && !g_blockProps[hitId].isSolid() && !g_blockProps[hitId].isLiquid()) {
+      px = g_hitResult.x;
+      py = g_hitResult.y;
+      pz = g_hitResult.z;
+    }
+
+    // If we are placing a plant, check if the block below is valid soil (grass/dirt/farmland)
+    bool canPlace = true;
+    if (g_heldBlock == BLOCK_SAPLING || g_heldBlock == BLOCK_TALLGRASS || g_heldBlock == BLOCK_FLOWER || 
+        g_heldBlock == BLOCK_ROSE || g_heldBlock == BLOCK_MUSHROOM_BROWN || g_heldBlock == BLOCK_MUSHROOM_RED) {
+      uint8_t floorId = g_level->getBlock(px, py - 1, pz);
+      if (floorId != BLOCK_GRASS && floorId != BLOCK_DIRT && floorId != BLOCK_FARMLAND) {
+        canPlace = false;
+      }
+    }
+
+    // Don't place if it would overlap with the player
+    int playerMinX = (int)floorf(g_player.x - R);
+    int playerMaxX = (int)floorf(g_player.x + R);
+    int playerMinY = (int)floorf(g_player.y);
+    int playerMaxY = (int)floorf(g_player.y + H);
+    int playerMinZ = (int)floorf(g_player.z - R);
+    int playerMaxZ = (int)floorf(g_player.z + R);
+
+    bool overlaps = (px >= playerMinX && px <= playerMaxX &&
+                     py >= playerMinY && py <= playerMaxY &&
+                     pz >= playerMinZ && pz <= playerMaxZ);
+
+    uint8_t targetBlock = g_level->getBlock(px, py, pz);
+    bool canReplaceTarget = (targetBlock == BLOCK_AIR || (!g_blockProps[targetBlock].isSolid() && !g_blockProps[targetBlock].isLiquid()));
+
+    if (canPlace && !overlaps && canReplaceTarget) {
+      g_level->setBlock(px, py, pz, g_heldBlock);
+      g_level->markDirty(px, py, pz);
+
+      // Immediately rebuild the central subchunk
+      int cx = px >> 4, cz = pz >> 4, sy = py >> 4;
+      g_chunkRenderer->rebuildChunkNow(cx, cz, sy);
+      
+      // Synchronously rebuild neighbor chunks at chunk boundaries
+      if ((px & 0xF) == 0  && cx > 0)
+        g_chunkRenderer->rebuildChunkNow(cx - 1, cz, sy);
+      if ((px & 0xF) == 15 && cx < WORLD_CHUNKS_X - 1)
+        g_chunkRenderer->rebuildChunkNow(cx + 1, cz, sy);
+      if ((pz & 0xF) == 0  && cz > 0)
+        g_chunkRenderer->rebuildChunkNow(cx, cz - 1, sy);
+      if ((pz & 0xF) == 15 && cz < WORLD_CHUNKS_Z - 1)
+        g_chunkRenderer->rebuildChunkNow(cx, cz + 1, sy);
+      if ((py & 0xF) == 0  && sy > 0)
+        g_chunkRenderer->rebuildChunkNow(cx, cz, sy - 1);
+      if ((py & 0xF) == 15 && sy < 3)
+        g_chunkRenderer->rebuildChunkNow(cx, cz, sy + 1);
+    }
+  }
+
+  // Cycle hotbar
+  static const uint8_t PLACEABLE[] = {
+    BLOCK_STONE, BLOCK_GRASS, BLOCK_DIRT, BLOCK_COBBLESTONE,
+    BLOCK_WOOD_PLANK, BLOCK_SAND, BLOCK_GRAVEL, BLOCK_LOG,
+    BLOCK_LEAVES, BLOCK_GLASS, BLOCK_SANDSTONE, BLOCK_WOOL,
+    BLOCK_GOLD_BLOCK, BLOCK_IRON_BLOCK, BLOCK_BRICK,
+    BLOCK_BOOKSHELF, BLOCK_MOSSY_COBBLE, BLOCK_OBSIDIAN,
+    BLOCK_GLOWSTONE, BLOCK_PUMPKIN,
+    BLOCK_FLOWER, BLOCK_ROSE, BLOCK_SAPLING, BLOCK_TALLGRASS
+  };
+  static const int NUM_PLACEABLE = sizeof(PLACEABLE) / sizeof(PLACEABLE[0]);
+  static int placeIdx = 3; // start at cobblestone
+
+  if (PSPInput_JustPressed(PSP_CTRL_RIGHT)) {
+    placeIdx = (placeIdx + 1) % NUM_PLACEABLE;
+    g_heldBlock = PLACEABLE[placeIdx];
+  }
+  if (PSPInput_JustPressed(PSP_CTRL_LEFT)) {
+    placeIdx = (placeIdx - 1 + NUM_PLACEABLE) % NUM_PLACEABLE;
+    g_heldBlock = PLACEABLE[placeIdx];
+  }
 }
 
 static void game_render() {
   float _tod = g_level->getTimeOfDay();
 
   // Camera setup
-  ScePspFVector3 camPos = {g_player.x, g_player.y + 1.6f, g_player.z};
+  ScePspFVector3 camPos = {g_player.x, g_player.y + 1.62f, g_player.z}; // 4J: heightOffset = 1.62
+  
   float yawRad = g_player.yaw * Mth::DEGRAD;
   float pitchRad = g_player.pitch * Mth::DEGRAD;
 
@@ -313,7 +374,7 @@ static void game_render() {
   ScePspFVector3 lookAt = {camPos.x + lookDir.x, camPos.y + lookDir.y,
                            camPos.z + lookDir.z};
 
-  // Compute clear color (fog color) BEFORE beginning frame
+  // Compute fog color
   uint32_t clearColor = 0xFF000000;
   if (g_skyRenderer) {
       clearColor = g_skyRenderer->getFogColor(_tod, lookDir);
@@ -329,6 +390,11 @@ static void game_render() {
   // Render chunks
   g_chunkRenderer->render(g_player.x, g_player.y, g_player.z);
 
+  // Render block highlight wireframe
+  if (g_hitResult.hit) {
+    BlockHighlight_Draw(g_hitResult.x, g_hitResult.y, g_hitResult.z, g_hitResult.id);
+  }
+
   if (g_cloudRenderer)
     g_cloudRenderer->renderClouds(g_player.x, g_player.y, g_player.z, 0.0f);
 
@@ -337,9 +403,7 @@ static void game_render() {
   PSPRenderer_EndFrame();
 }
 
-// ====================================================
-// Entry Point
-// ====================================================
+// Main entry point
 int main(int argc, char *argv[]) {
   setup_callbacks();
 

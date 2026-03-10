@@ -15,7 +15,12 @@ BlockUV g_blockUV[BLOCK_COUNT];
 
 // props(hardness*10, light_emit, light_block, flags)
 #define DEF_PROPS(id, h, le, lb, fl)                                           \
-  g_blockProps[id] = {(uint8_t)(h), (uint8_t)(le), (uint8_t)(lb), (uint8_t)(fl)}
+  do {                                                                         \
+    g_blockProps[id].hardness_x10 = (uint8_t)(h);                              \
+    g_blockProps[id].light_emit = (uint8_t)(le);                               \
+    g_blockProps[id].light_block = (uint8_t)(lb);                              \
+    g_blockProps[id].flags = (uint8_t)(fl);                                    \
+  } while (0)
 
 // uv(id, tx, ty, sx, sy, bx, by) -- coordinates in 0-15 grid
 #define DEF_UV(id, tx, ty, sx, sy, bx, by)                                     \
@@ -26,6 +31,16 @@ void Blocks_Init() {
   // Initialize everything with zero (AIR)
   memset(g_blockProps, 0, sizeof(g_blockProps));
   memset(g_blockUV, 0, sizeof(g_blockUV));
+
+  // Default AABB for all blocks is a full 1x1x1 cube
+  for (int i = 0; i < BLOCK_COUNT; i++) {
+    g_blockProps[i].minX = 0.0f;
+    g_blockProps[i].minY = 0.0f;
+    g_blockProps[i].minZ = 0.0f;
+    g_blockProps[i].maxX = 1.0f;
+    g_blockProps[i].maxY = 1.0f;
+    g_blockProps[i].maxZ = 1.0f;
+  }
 
   // === Properties ===
   //               id              hard  emit  block  flags
@@ -50,8 +65,9 @@ void Blocks_Init() {
   DEF_PROPS(BLOCK_GLASS, 3, 0, 0, SOLID | TRANSP);
   DEF_PROPS(BLOCK_SANDSTONE, 8, 0, 15, SOLID);
   DEF_PROPS(BLOCK_WOOL, 8, 0, 15, SOLID);
-  DEF_PROPS(BLOCK_YELLOW_FLOWER, 0, 0, 0, TRANSP);
-  DEF_PROPS(BLOCK_RED_FLOWER, 0, 0, 0, TRANSP);
+  DEF_PROPS(BLOCK_TALLGRASS, 0, 0, 0, TRANSP);
+  DEF_PROPS(BLOCK_FLOWER, 0, 0, 0, TRANSP);
+  DEF_PROPS(BLOCK_ROSE, 0, 0, 0, TRANSP);
   DEF_PROPS(BLOCK_GOLD_BLOCK, 30, 0, 15, SOLID);
   DEF_PROPS(BLOCK_IRON_BLOCK, 50, 0, 15, SOLID);
   DEF_PROPS(BLOCK_BRICK, 20, 0, 15, SOLID);
@@ -76,6 +92,20 @@ void Blocks_Init() {
   DEF_PROPS(BLOCK_LADDER, 4, 0, 0, TRANSP);
   DEF_PROPS(BLOCK_REEDS, 0, 0, 0, TRANSP);
   DEF_PROPS(BLOCK_PUMPKIN, 10, 0, 15, SOLID);
+
+  // Custom hitboxes
+  auto setBounds = [](uint8_t id, float mx, float my, float mz, float Mx, float My, float Mz) {
+    g_blockProps[id].minX = mx; g_blockProps[id].minY = my; g_blockProps[id].minZ = mz;
+    g_blockProps[id].maxX = Mx; g_blockProps[id].maxY = My; g_blockProps[id].maxZ = Mz;
+  };
+
+  setBounds(BLOCK_TALLGRASS, 0.2f, 0.0f, 0.2f, 0.8f, 0.8f, 0.8f);
+  setBounds(BLOCK_FLOWER,    0.3f, 0.0f, 0.3f, 0.7f, 0.6f, 0.7f);
+  setBounds(BLOCK_ROSE,      0.3f, 0.0f, 0.3f, 0.7f, 0.6f, 0.7f);
+  setBounds(BLOCK_SAPLING,   0.2f, 0.0f, 0.2f, 0.8f, 0.8f, 0.8f);
+  setBounds(BLOCK_TORCH,     0.4f, 0.0f, 0.4f, 0.6f, 0.6f, 0.6f);
+  setBounds(BLOCK_CHEST,     0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f);
+  setBounds(BLOCK_SNOW,      0.0f, 0.0f, 0.0f, 1.0f, 0.125f, 1.0f);
 
   // === UV Atlas (terrain.png 16x16 grid) ===
   //       id                top      side     bottom
@@ -114,6 +144,10 @@ void Blocks_Init() {
   DEF_UV(BLOCK_MOSSY_COBBLE, 4, 2, 4, 2, 4, 2);
   DEF_UV(BLOCK_CLAY, 8, 4, 8, 4, 8, 4);
   DEF_UV(BLOCK_PUMPKIN, 6, 6, 7, 7, 6, 6);
+  // Cross-sprite plants (UV tile used for all quads in the X-pattern)
+  DEF_UV(BLOCK_TALLGRASS, 7, 2, 7, 2, 7, 2);    // tallgrass col=7, row=2
+  DEF_UV(BLOCK_FLOWER, 13, 0, 13, 0, 13, 0); // dandelion col=13, row=0
+  DEF_UV(BLOCK_ROSE, 12, 0, 12, 0, 12, 0);    // rose col=12, row=0
   // Water - classic Minecraft terrain.png: water_still = col13,row12; water_flow = col13,row13
   DEF_UV(BLOCK_WATER_STILL, 13, 12, 13, 12, 13, 12);
   DEF_UV(BLOCK_WATER_FLOW, 13, 13, 13, 13, 13, 13);

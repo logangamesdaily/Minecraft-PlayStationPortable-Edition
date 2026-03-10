@@ -1,8 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-// Block IDs - from Minecraft.World/Tile.h (selection)
-// Adaptation: we only keep the numeric IDs and basic properties
+// Block IDs
 
 enum BlockID : uint16_t {
   BLOCK_AIR = 0,
@@ -12,6 +11,7 @@ enum BlockID : uint16_t {
   BLOCK_COBBLESTONE = 4,
   BLOCK_WOOD_PLANK = 5,
   BLOCK_SAPLING = 6,
+  BLOCK_TALLGRASS = 31,
   BLOCK_BEDROCK = 7,
   BLOCK_WATER_FLOW = 8,
   BLOCK_WATER_STILL = 9,
@@ -28,8 +28,8 @@ enum BlockID : uint16_t {
   BLOCK_LAPIS_ORE = 21,
   BLOCK_SANDSTONE = 24,
   BLOCK_WOOL = 35,
-  BLOCK_YELLOW_FLOWER = 37,
-  BLOCK_RED_FLOWER = 38,
+  BLOCK_FLOWER = 37,
+  BLOCK_ROSE = 38,
   BLOCK_MUSHROOM_BROWN = 39,
   BLOCK_MUSHROOM_RED = 40,
   BLOCK_GOLD_BLOCK = 41,
@@ -76,12 +76,16 @@ enum BlockID : uint16_t {
   BLOCK_COUNT = 256
 };
 
-// Per-block properties stored in global tables
+// Block properties
 struct BlockProps {
   uint8_t hardness_x10; // hardness * 10 (0 = indestructible)
   uint8_t light_emit;   // emitted light [0..15]
   uint8_t light_block;  // blocked light [0..15]
   uint8_t flags;        // bit 0: solid, bit 1: transparent, bit 2: liquid
+
+  // Bounding box for block highlight (0.0 to 1.0)
+  float minX, minY, minZ;
+  float maxX, maxY, maxZ;
 
   bool isSolid() const { return (flags & 1) != 0; }
   bool isTransparent() const { return (flags & 2) != 0; }
@@ -91,8 +95,7 @@ struct BlockProps {
 
 extern BlockProps g_blockProps[BLOCK_COUNT];
 
-// UV tile coordinates in terrain.png atlas (16x16 grid, 256x256 texture)
-// Each tile = 16x16 px  =>  UV step = 1/16 = 0.0625
+// Texture coordinate mappings
 struct BlockUV {
   uint8_t top_x, top_y;   // top face
   uint8_t side_x, side_y; // side faces

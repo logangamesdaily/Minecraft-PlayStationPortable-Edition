@@ -38,9 +38,9 @@ void Frustum::update(ScePspFMatrix4& clip) {
 }
 
 Frustum::Intersection Frustum::testAABB(const AABB& box) {
-    float x[2] = {box.minX, box.maxX};
-    float y[2] = {box.minY, box.maxY};
-    float z[2] = {box.minZ, box.maxZ};
+    float x[2] = {(float)box.x0, (float)box.x1};
+    float y[2] = {(float)box.y0, (float)box.y1};
+    float z[2] = {(float)box.z0, (float)box.z1};
 
     for (int i = 0; i < 6; ++i) {
         int inCount = 0;
@@ -57,7 +57,7 @@ Frustum::Intersection Frustum::testAABB(const AABB& box) {
             }
         }
         
-        // If ABSOLUTELY ALL 8 corners are outside the plane (deep outside), the chunk is invisible
+        // Frustum occlusion cull if all 8 points are outside.
         if (inCount == 0) {
             return OUTSIDE;
         }

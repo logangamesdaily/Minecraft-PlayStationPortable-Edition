@@ -1,6 +1,4 @@
-// WorldGen.cpp - Procedural world generation
-// Ported/adapted from Minecraft.World/RandomLevelSource.cpp (4J Studios, Oct 2014) 
-// Noise -> NoiseGen, Trees -> TreeFeature, this class only handles base chunk gen
+// WorldGen.cpp
 
 #include "WorldGen.h"
 #include "Blocks.h"
@@ -10,9 +8,7 @@
 #include "chunk_defs.h"
 #include <string.h>
 
-// ============================================================
-// Terrain height at a given world coordinate
-// ============================================================
+// Get terrain height
 int WorldGen::getTerrainHeight(int wx, int wz, int64_t seed) {
   // 4 noise octaves, 64 block scale
   float n = NoiseGen::octaveNoise(wx / 64.0f, wz / 64.0f, seed);
@@ -20,9 +16,7 @@ int WorldGen::getTerrainHeight(int wx, int wz, int64_t seed) {
   return 40 + (int)(n * 20.0f);
 }
 
-// ============================================================
-// Generates the blocks for a full chunk
-// ============================================================
+// Generate chunk
 void WorldGen::generateChunk(
     uint8_t out[CHUNK_SIZE_X][CHUNK_SIZE_Z][CHUNK_SIZE_Y], int cx, int cz,
     int64_t worldSeed) {
@@ -66,4 +60,80 @@ void WorldGen::generateChunk(
       }
     }
   }
+
+  // === Vegetation ===
+  int xo = cx * CHUNK_SIZE_X;
+  int zo = cz * CHUNK_SIZE_Z;
+
+  // 1-2 grass clusters per chunk
+  int grassClusters = 1 + rng.nextInt(2);
+  for (int i = 0; i < grassClusters; i++) {
+    int x = xo + rng.nextInt(16);
+    int z = zo + rng.nextInt(16);
+    int y = rng.nextInt(CHUNK_SIZE_Y);
+    
+    // TallGrassFeature spreads 128 times around the center
+    for (int j = 0; j < 128; j++) {
+      int x2 = x + rng.nextInt(8) - rng.nextInt(8);
+      int y2 = y + rng.nextInt(4) - rng.nextInt(4);
+      int z2 = z + rng.nextInt(8) - rng.nextInt(8);
+      
+      int lx = x2 - xo;
+      int ly = y2;
+      int lz = z2 - zo;
+      
+      if (lx >= 0 && lx < CHUNK_SIZE_X && lz >= 0 && lz < CHUNK_SIZE_Z && ly > 0 && ly < CHUNK_SIZE_Y) {
+        if (out[lx][lz][ly] == BLOCK_AIR && out[lx][lz][ly - 1] == BLOCK_GRASS) {
+          out[lx][lz][ly] = BLOCK_TALLGRASS;
+        }
+      }
+    }
+  }
+
+  // Flowers (2 clusters)
+  for (int i = 0; i < 2; i++) {
+    int x = xo + rng.nextInt(16);
+    int z = zo + rng.nextInt(16);
+    int y = rng.nextInt(CHUNK_SIZE_Y);
+    
+    // FlowerFeature spreads 64 times
+    for (int j = 0; j < 64; j++) {
+      int x2 = x + rng.nextInt(8) - rng.nextInt(8);
+      int y2 = y + rng.nextInt(4) - rng.nextInt(4);
+      int z2 = z + rng.nextInt(8) - rng.nextInt(8);
+      
+      int lx = x2 - xo;
+      int ly = y2;
+      int lz = z2 - zo;
+      
+      if (lx >= 0 && lx < CHUNK_SIZE_X && lz >= 0 && lz < CHUNK_SIZE_Z && ly > 0 && ly < CHUNK_SIZE_Y) {
+        if (out[lx][lz][ly] == BLOCK_AIR && out[lx][lz][ly - 1] == BLOCK_GRASS) {
+          out[lx][lz][ly] = BLOCK_FLOWER;
+        }
+      }
+    }
+    
+    // Rose (25% chance of second flower patch being red)
+    if (rng.nextInt(4) == 0) {
+      x = xo + rng.nextInt(16);
+      z = zo + rng.nextInt(16);
+      y = rng.nextInt(CHUNK_SIZE_Y);
+      for (int j = 0; j < 64; j++) {
+        int x2 = x + rng.nextInt(8) - rng.nextInt(8);
+        int y2 = y + rng.nextInt(4) - rng.nextInt(4);
+        int z2 = z + rng.nextInt(8) - rng.nextInt(8);
+        
+        int lx = x2 - xo;
+        int ly = y2;
+        int lz = z2 - zo;
+        
+        if (lx >= 0 && lx < CHUNK_SIZE_X && lz >= 0 && lz < CHUNK_SIZE_Z && ly > 0 && ly < CHUNK_SIZE_Y) {
+          if (out[lx][lz][ly] == BLOCK_AIR && out[lx][lz][ly - 1] == BLOCK_GRASS) {
+            out[lx][lz][ly] = BLOCK_ROSE;
+          }
+        }
+      }
+    }
+  }
 }
+

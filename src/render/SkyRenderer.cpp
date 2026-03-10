@@ -71,13 +71,8 @@ void SimpleTexture::bind() {
 }
 
 SkyRenderer::SkyRenderer(Level *level) : m_level(level) {
-  // Pre-allocate GE-aligned memory for faster hardware drawing
-  m_celestialVertices = (SkyVertex *)memalign(
-      16, 32 * sizeof(SkyVertex)); // Increase to 32 for sunrise fan
+  m_celestialVertices = (SkyVertex *)memalign(16, 32 * sizeof(SkyVertex));
 
-  // Generate a mesh for the sky plane matching CloudRenderer voxel size
-  // s = 16 ensures small enough triangles to prevent hardware guard-band overflow on PSP.
-  // d = 32 gives a radius of 512, ensuring it reliably hits the fog max-distance completely.
   int s = 16;
   int d = 32;
   m_numSkyVertices = (d * 2) * (d * 2) * 6;
@@ -96,7 +91,6 @@ SkyRenderer::SkyRenderer(Level *level) : m_level(level) {
   // Build sky box
   int skyIdx = 0;
   float yy = 16.0f;
-  // Note: the loop uses < instead of <= to match the (d*2)*(d*2) vertex count perfectly
   for (int xx = -s * d; xx < s * d; xx += s) {
     for (int zz = -s * d; zz < s * d; zz += s) {
       m_skyVertices[skyIdx++] = {(float)(xx + 0), yy, (float)(zz + 0)};
@@ -132,13 +126,10 @@ SkyRenderer::SkyRenderer(Level *level) : m_level(level) {
       10842); // Initialize generator with exact Minecraft seed
 
   for (int i = 0; i < 1500; i++) {
-    // Get coordinates using Random class that reproduces Java behavior
     float x = random.nextFloat() * 2.0f - 1.0f;
     float y = random.nextFloat() * 2.0f - 1.0f;
     float z = random.nextFloat() * 2.0f - 1.0f;
 
-    // Star size (0.15f + 0.1f is closer to vanilla, but can use smaller
-    // 0.04f + 0.03f for PSP screen if desired)
     float ss = 0.15f + random.nextFloat() * 0.1f;
 
     float d_sq = x * x + y * y + z * z;
@@ -148,7 +139,6 @@ SkyRenderer::SkyRenderer(Level *level) : m_level(level) {
       y *= id;
       z *= id;
 
-      // Vanilla Minecraft uses 100.0f distance, but 50.0f is ok for PSP
       float xp = x * 100.0f;
       float yp = y * 100.0f;
       float zp = z * 100.0f;
@@ -265,14 +255,10 @@ uint32_t SkyRenderer::getFogColor(float timeOfDay, const ScePspFVector3& lookDir
 }
 
 bool SkyRenderer::getSunriseColor(float timeOfDay, float *outColor) {
-  // Use the exact 4J window: only draw sunrise/sunset when
-  // cos(celestialAngle * 2*PI) is in [-0.4, +0.4]
-  // This matches Dimension.cpp's sun angle calculation
   float f = cosf(timeOfDay * PI * 2.0f);
 
   if (f >= -0.4f && f <= 0.4f) {
     float f1 = (f - 0.0f) / 0.4f * 0.5f + 0.5f;
-    // Alpha decreases toward zero at window edges (natural fade)
     float f2 = 1.0f - (1.0f - sinf(f1 * PI)) * 0.99f;
     f2 = f2 * f2;
 
@@ -298,15 +284,12 @@ float SkyRenderer::getStarBrightness(float timeOfDay) {
   return br * br * 0.5f;
 }
 
-// Returns current moon phase 0-7 based on the total elapsed time
-// In Minecraft, moon phases cycle every 8 in-game days
-// timeOfDay is 0.0 -> 1.0, we count full days through m_level's tick
+// Get current moon phase (0-7)
 int SkyRenderer::getMoonPhase(float /*timeOfDay*/) {
-  // Phase 0 = full moon, cycles every 8 in-game days
   return m_level->getDay() % 8;
 }
 
-// Global sky brightness factor (0 = night, 1 = full day)
+// Sky brightness (0=night, 1=day)
 float SkyRenderer::getBrightness(float timeOfDay) {
   float br = cosf(timeOfDay * PI * 2.0f) * 2.0f + 0.5f;
   if (br < 0.0f)
@@ -320,20 +303,12 @@ void SkyRenderer::renderSky(float playerX, float playerY, float playerZ, const S
   float timeOfDay = m_level->getTimeOfDay();
   uint32_t skyCol = getSkyColor(timeOfDay);
 
-  // 4J Fog-based horizon gradient
-  // Calculate fog color incorporating sunrise/sunset blending
   uint32_t horizonCol = getFogColor(timeOfDay, lookDir);
 
-  // In Console 2014, the screen is cleared entirely to the fog color, allowing the 
-  // far edges of the sky geometry (at Y=16, spanning up to distance 256) to smoothly
-  // blend into the void/fog with no clipping cuts.
   sceGuClearColor(horizonCol);
-
   sceGuFog(40.0f, 120.0f, horizonCol);
 
-  // CRITICAL FIX: To prevent PSP GE hardware guard-band clipping bugs drop-outing
-  // the sky planes when viewed horizontally, push a safer projection matrix with a
-  // farther Near Clip Plane (4.0f).
+  // Use wider near clip for sky to avoid hardware cutouts
   sceGumMatrixMode(GU_PROJECTION);
   sceGumPushMatrix();
   sceGumLoadIdentity();
@@ -361,19 +336,12 @@ void SkyRenderer::renderSky(float playerX, float playerY, float playerZ, const S
   sceGuDisable(GU_FOG);
   sceGuEnable(GU_BLEND);
 
-  // =========================================
-  // 1. Sun and Moon FIRST (additive blending)
-  //    Additive: black bg = 0 added = transparent.
-  //    Bright moon disc saturates to white → stars drawn after cannot exceed white → invisible inside disc!
-  // =========================================
+  // Sun and moon (additive blending)
   sceGuEnable(GU_TEXTURE_2D);
-  // Additive blending: treats black pixels as transparent (0 + dst = dst)
   sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_FIX, 0, 0xFFFFFFFF);
   sceGumPushMatrix();
 
-  // Rotate -90 on Y (matches glRotatef(-90, 0, 1, 0))
   sceGumRotateY(-PI / 2.0f);
-  // Rotate based on time of day (matches glRotatef(timeOfDay * 360, 1, 0, 0))
   sceGumRotateX(timeOfDay * PI * 2.0f);
 
   sceGuDisable(GU_CULL_FACE);
@@ -444,7 +412,6 @@ void SkyRenderer::renderSky(float playerX, float playerY, float playerZ, const S
   sceGuEnable(GU_CULL_FACE);
   sceGumPopMatrix(); // Pops celestial rotation
 
-  // Restore render states for the rest of the scene
   sceGuEnable(GU_FOG);
   sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
   sceGuDepthMask(GU_FALSE);
@@ -458,14 +425,14 @@ void SkyRenderer::renderSky(float playerX, float playerY, float playerZ, const S
   // The PSP clears the background to `horizonCol` (the fog color).
   // This causes the void to be perfectly seamless without drawing a buggy black box!
 
-  sceGumPopMatrix(); // Pops playerPos (MODEL)
+  sceGumPopMatrix(); // model matrix
 
-  // Restore Projection Matrix
+  // Restore projection
   sceGumMatrixMode(GU_PROJECTION);
   sceGumPopMatrix();
   sceGumMatrixMode(GU_MODEL);
 
-  // Restore proper render state for world geometry
+  // Restore world render state
   sceGuEnable(GU_DEPTH_TEST);
   sceGuDepthFunc(GU_GEQUAL);
   sceGuDepthMask(GU_FALSE);
@@ -475,5 +442,5 @@ void SkyRenderer::renderSky(float playerX, float playerY, float playerZ, const S
 
   // CRITICAL: Restore the shorter world fog distances! 
   // Otherwise chunks will cut off sharply at 64 blocks instead of fading into fog.
-  sceGuFog(40.0f, 64.0f, horizonCol);
+  sceGuFog(32.0f, 64.0f, horizonCol);
 }

@@ -53,14 +53,11 @@ CloudRenderer::~CloudRenderer() {
 
 void CloudRenderer::renderClouds(float playerX, float playerY, float playerZ,
                                  float alpha) {
-  // =========================================================================
-  // SETTINGS AREA - SAFE TO MODIFY TWEAKS
-  // =========================================================================
-  float cloudSpeed = 0.5f;      // Wind scroll speed
-  float cloudHeight = 140.0f;   // Y-axis height
-  float cloudThickness = 8.0f; // 4J Studios: 12-block thick cloud layer
-  float qS = 12.0f;             // Vanilla scale. 32 was too large, causing PSP GPU fixed-point overflow
-  int drawDistance = 48;        // 48x48=2304 blocks total. 48*12=576 world size. Fog hides boundary
+  float cloudSpeed = 0.5f;
+  float cloudHeight = 140.0f;
+  float cloudThickness = 8.0f;
+  float qS = 12.0f;
+  int drawDistance = 48;
 
   float tod = m_level->getTimeOfDay();
   float br = cosf(tod * 3.14159265f * 2.0f) * 2.0f + 0.5f;
@@ -89,10 +86,9 @@ void CloudRenderer::renderClouds(float playerX, float playerY, float playerZ,
 
   bool inClouds = (playerY >= cloudHeight - cloudThickness - 2.0f && playerY <= cloudHeight + 2.0f);
 
-  // 4J logic: "opaque" from outside (but transparent enough to let the bright sun bleed through)
-  uint8_t aTop = inClouds ? 0xC0 : 0xD0; // 82% when outside
-  uint8_t aSide = inClouds ? 0xB0 : 0xC0; // 75% when outside
-  uint8_t aBot = inClouds ? 0x90 : 0xAA; // 66% when outside
+  uint8_t aTop  = inClouds ? 0xC0 : 0xD0;
+  uint8_t aSide = inClouds ? 0xB0 : 0xC0;
+  uint8_t aBot  = inClouds ? 0x90 : 0xAA;
 
   uint32_t colorTop    = makeColor(aTop, 0xFF, 0xFF, 0xFF); 
   uint32_t colorSide   = makeColor(aSide, 0xE5, 0xE5, 0xE5); 
@@ -113,7 +109,7 @@ void CloudRenderer::renderClouds(float playerX, float playerY, float playerZ,
   float snappedOffset = floorf(m_cloudOffset / qS) * qS;
   float slideOffset = m_cloudOffset - snappedOffset;
 
-  // Rebuild mesh if player moved, grid snapped, or player entered/exited clouds
+  // Rebuild if player moved or state changed
   bool meshRebuild = false;
   if (px != m_lastCloudPx || pz != m_lastCloudPz ||
       snappedOffset != m_lastCloudSnappedOffset ||
@@ -141,9 +137,6 @@ void CloudRenderer::renderClouds(float playerX, float playerY, float playerZ,
 
     for (int x = -drawDistance / 2; x < drawDistance / 2; x++) {
       for (int z = -drawDistance / 2; z < drawDistance / 2; z++) {
-        // WORLD-SPACE coords (vertex positions are absolute world X/Z)
-        // drawDistance kept small to avoid PSP guard-band clipping:
-        // max vertex = px ± (drawDistance/2 * qS) = player ± 120 blocks
         float x0 = px + (float)(x * qS);
         float z0 = pz + (float)(z * qS);
 
@@ -155,9 +148,6 @@ void CloudRenderer::renderClouds(float playerX, float playerY, float playerZ,
         float y0 = cloudHeight - cloudThickness;
         float y1 = cloudHeight;
 
-        // Texture mapping synced with snapped wind offset
-        // MANUAL WRAP: We must wrap the coords continuously near [0..1] to avoid PSP GPU floating-point precision loss
-        // at extremely high world coordinate values, which causes visible gaps/holes in repeating textures.
         float texX = fmodf(x0 + snappedOffset, m_cloudTexWidth * qS);
         if (texX < 0)
           texX += m_cloudTexWidth * qS;
@@ -178,7 +168,7 @@ void CloudRenderer::renderClouds(float playerX, float playerY, float playerZ,
         bool solidBack  = isSolid(x0, z0 + qS);
 
         if (vIdx > 59000)
-          break; // PSP memory safety buffer
+          break;
 
         auto emitQuad = [&](float tu0, float tv0, float tu1, float tv1,
                             uint32_t col, float vx0, float vy0, float vz0,
@@ -232,7 +222,7 @@ void CloudRenderer::renderClouds(float playerX, float playerY, float playerZ,
 
   m_cloudsTex.bind();
 
-  // Replicate sky fog color (Level::dimension is missing in this port)
+  // Fog color
   float f = cosf(tod * 3.14159265f * 2.0f);
   float brSky = f * 2.0f + 0.5f;
   if (brSky < 0.0f)
@@ -250,8 +240,7 @@ void CloudRenderer::renderClouds(float playerX, float playerY, float playerZ,
 
   // Setup hardware fog for clouds
   sceGuEnable(GU_FOG);
-  // Cloud fog: hides draw-distance boundary (512 blocks away) and horizon clipping
-  float farFog = (float)(drawDistance / 2) * qS; // = 16 * 32 = 512 blocks
+  float farFog = (float)(drawDistance / 2) * qS;
   sceGuFog(farFog * 0.5f, farFog * 0.9f, fogColor);
   sceGuEnable(GU_CULL_FACE);
   sceGuEnable(GU_BLEND);
@@ -267,37 +256,28 @@ void CloudRenderer::renderClouds(float playerX, float playerY, float playerZ,
   sceGumPushMatrix();
   sceGumLoadIdentity();
 
-  // Wind-only scroll in model matrix (no player translation needed:
-  // cloud vertices are already in world space centered on player's snapped pos)
+  // Translate by wind scroll
   ScePspFVector3 cloudTrans = {-slideOffset, 0.0f, 0.0f};
   sceGumTranslate(&cloudTrans);
 
-  // =========================================================================
-  // TWO-PASS CLOUD RENDERING (depth prepass always active)
-  // Pass 1: Write Z-shell (no color). From outside: CCW only.
-  //         From inside: CCW + CW, so all face seams are Z-protected.
-  // Pass 2: Draw color over the Z-shell, no Z-writes (clean alpha blend).
-  // =========================================================================
-
-  // --- Pass 1: Depth prepass ---
-  sceGuDepthMask(GU_FALSE); // Z-writes ON
-  sceGuBlendFunc(GU_ADD, GU_FIX, GU_FIX, 0x00000000, 0xFFFFFFFF); // invisible to color
+  // Pass 1: depth prepass
+  sceGuDepthMask(GU_FALSE);
+  sceGuBlendFunc(GU_ADD, GU_FIX, GU_FIX, 0x00000000, 0xFFFFFFFF);
   sceGuFrontFace(GU_CCW);
   sceGumDrawArray(GU_TRIANGLES,
                   GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
                   m_numCloudVertices, 0, m_cloudVertices);
   if (inClouds) {
-    // Also prepass the inside faces to lock their Z-values
     sceGuFrontFace(GU_CW);
     sceGumDrawArray(GU_TRIANGLES,
                     GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
                     m_numCloudVertices, 0, m_cloudVertices);
   }
 
-  // --- Pass 2: Color pass ---
-  sceGuDepthMask(GU_TRUE); // Z-writes OFF (keep transparent correct)
+  // Pass 2: color pass
+  sceGuDepthMask(GU_TRUE);
   sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
-  sceGuFrontFace(GU_CCW);
+  sceGuFrontFace(GU_CCW);;
   sceGumDrawArray(GU_TRIANGLES,
                   GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
                   m_numCloudVertices, 0, m_cloudVertices);
@@ -307,12 +287,10 @@ void CloudRenderer::renderClouds(float playerX, float playerY, float playerZ,
                     GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
                     m_numCloudVertices, 0, m_cloudVertices);
   }
-  // =========================================================================
-
-  // Restore global state
+  // Restore state
   sceGuFrontFace(GU_CCW);
   sceGumPopMatrix();
   sceGuDisable(GU_BLEND);
   sceGuEnable(GU_FOG);
-  sceGuDepthMask(GU_FALSE); // Re-enable Z-writes for next frame
+  sceGuDepthMask(GU_FALSE);
 }

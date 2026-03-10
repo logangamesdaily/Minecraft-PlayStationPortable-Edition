@@ -1,5 +1,4 @@
-// TextureAtlas.cpp - loads terrain.png with stb_image into PSP VRAM
-// stb_image decodes PNG -> RGBA8888, directly compatible with GU_PSM_8888
+// TextureAtlas.cpp
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO           // we use sceIo instead of fopen
@@ -15,15 +14,11 @@
 #include <string.h>
 
 TextureAtlas::TextureAtlas()
-    : vramPtr(nullptr), vramPtr1(nullptr), vramPtr2(nullptr), width(256),
-      height(256) {}
+    : vramPtr(nullptr), width(256), height(256) {}
 
 TextureAtlas::~TextureAtlas() {}
 
-// ============================================================
-// Reads an entire file using sceIo -> malloc buffer
-// Returns nullptr on error, caller must free
-// ============================================================
+// Read file via sceIo, caller must free
 static unsigned char *read_file(const char *path, int *out_size) {
   SceUID fd = sceIoOpen(path, PSP_O_RDONLY, 0777);
   if (fd < 0)
@@ -51,25 +46,11 @@ static unsigned char *read_file(const char *path, int *out_size) {
   return buf;
 }
 
-// ============================================================
-// VRAM offset calculation after frame+depth buffers
-// Frame 0: 512*272*4 = 557056
-// Frame 1: 512*272*4 = 557056
-// Depth:   512*272*2 = 278528
-// Total display: 1392640 bytes (~1.33MB)
-// Texture 256*256*4 = 262144 bytes (~0.25MB)
-// Mipmap 1 128*128*4= 65536 bytes (~0.06MB)
-// Mipmap 2 64*64*4  = 16384 bytes (~0.01MB)
-// Total PSP VRAM: 2097152 bytes (2MB) - we have space!
-// ============================================================
 static const unsigned int VRAM_BASE = 0x04000000u;
 static const unsigned int TEX_OFFSET =
     512 * 272 * 4 + 512 * 272 * 4 + 512 * 272 * 2;
 
-// ============================================================
-// Fallback palette - correct Minecraft colors per tile
-// (used if terrain.png cannot be loaded)
-// ============================================================
+// Fallback texture palette
 static uint32_t tile_colors[256];
 
 static void init_fallback_palette() {
@@ -130,13 +111,9 @@ static void generate_fallback_texture(uint32_t *tex) {
   }
 }
 
-// ============================================================
-// Load
-// ============================================================
+// Load terrain.png into VRAM
 bool TextureAtlas::load(const char *path) {
   uint32_t *vram = (uint32_t *)(VRAM_BASE + TEX_OFFSET);
-  uint32_t *vram1 = vram + (256 * 256);
-  uint32_t *vram2 = vram1 + (128 * 128);
 
   // Plains grass tint: RGB(0x7E, 0xBD, 0x6B) - plains biome
   const float gR = 0x7E / 255.0f; // factor R
@@ -150,7 +127,7 @@ bool TextureAtlas::load(const char *path) {
 
   auto apply_tints = [&](unsigned char *pxs, int w, int h) {
     if (!pxs) return;
-    int ts = w / 16; // Tile size (16 for 256, 8 for 128, 4 for 64)
+    int ts = w / 16; // Tile size (16 for 256)
 
     auto tint_px = [&](int px, int py, float fr, float fg, float fb) {
       unsigned char *p = pxs + (py * w + px) * 4;
@@ -200,37 +177,6 @@ bool TextureAtlas::load(const char *path) {
       stbi_image_free(pixels);
 
       vramPtr = (void *)vram;
-      
-      // Load Mipmap Level 1 (128x128)
-      int fSize1 = 0;
-      unsigned char *fData1 = read_file("res/terrainMipMapLevel2.png", &fSize1);
-      if (fData1) {
-        int w1, h1, c1;
-        unsigned char *pxs1 = stbi_load_from_memory(fData1, fSize1, &w1, &h1, &c1, 4);
-        free(fData1);
-        if (pxs1 && w1 == 128 && h1 == 128) {
-          apply_tints(pxs1, 128, 128);
-          memcpy(vram1, pxs1, 128 * 128 * 4);
-          vramPtr1 = (void *)vram1;
-          stbi_image_free(pxs1);
-        } else if (pxs1) stbi_image_free(pxs1);
-      }
-
-      // Load Mipmap Level 2 (64x64)
-      int fSize2 = 0;
-      unsigned char *fData2 = read_file("res/terrainMipMapLevel3.png", &fSize2);
-      if (fData2) {
-        int w2, h2, c2;
-        unsigned char *pxs2 = stbi_load_from_memory(fData2, fSize2, &w2, &h2, &c2, 4);
-        free(fData2);
-        if (pxs2 && w2 == 64 && h2 == 64) {
-          apply_tints(pxs2, 64, 64);
-          memcpy(vram2, pxs2, 64 * 64 * 4);
-          vramPtr2 = (void *)vram2;
-          stbi_image_free(pxs2);
-        } else if (pxs2) stbi_image_free(pxs2);
-      }
-
       width = 256;
       height = 256;
       sceKernelDcacheWritebackAll();
@@ -251,32 +197,11 @@ bool TextureAtlas::load(const char *path) {
   return true; // return true anyway (fallback is valid)
 }
 
-// ============================================================
-// Bind texture for rendering
-// ============================================================
+// Bind texture
 void TextureAtlas::bind() {
-  if (vramPtr2 != nullptr) {
-    sceGuTexMode(GU_PSM_8888, 2, 0, 0);
-  } else if (vramPtr1 != nullptr) {
-    sceGuTexMode(GU_PSM_8888, 1, 0, 0);
-  } else {
-    sceGuTexMode(GU_PSM_8888, 0, 0, 0);
-  }
-  
+  sceGuTexMode(GU_PSM_8888, 0, 0, 0);
   sceGuTexImage(0, 256, 256, 256, vramPtr);
-  if (vramPtr1) sceGuTexImage(1, 128, 128, 128, vramPtr1);
-  if (vramPtr2) sceGuTexImage(2, 64, 64, 64, vramPtr2);
-  
   sceGuTexScale(1.0f, 1.0f);
   sceGuTexOffset(0.0f, 0.0f);
-  
-  // Force Level 0 (256x256) always.
-  // GU_NEAREST_MIPMAP_NEAREST causes the hardware to auto-select mipmap level
-  // based on screen-space UV derivatives (viewing angle). This causes textures to
-  // change quality based on camera direction, not block distance.
-  // By always overriding with GU_TEXTURE_CONST + level 0, we get crisp pixel-art
-  // Minecraft textures at all distances, matching the 4J Studios look.
-  sceGuTexLevelMode(GU_TEXTURE_CONST, 0.0f);
   sceGuTexFilter(GU_NEAREST, GU_NEAREST);
 }
-

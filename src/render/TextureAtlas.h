@@ -7,8 +7,6 @@
 class TextureAtlas {
 public:
   void *vramPtr; // pointer in VRAM (256x256)
-  void *vramPtr1; // pointer in VRAM (128x128)
-  void *vramPtr2; // pointer in VRAM (64x64)
   int width;
   int height;
 
@@ -19,7 +17,7 @@ public:
   void bind();
 
   // Epsilon to push UVs slightly inward to prevent nearest-neighbor floating point rounding errors
-  // at block borders. 0.00195f represents half a texel on the 256x256 base level (which maps to 0.125 texels on 64x64, plenty to stop FP bleed).
+  // at block borders. 0.00195f represents half a texel on the 256x256 base level.
   static float tileEpsilon() { return 0.001953125f; }
   
   static float tileU(int tx) { return (tx / 16.0f) + tileEpsilon(); }

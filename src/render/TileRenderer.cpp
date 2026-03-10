@@ -1,4 +1,5 @@
 #include "TileRenderer.h"
+#include "../world/Blocks.h"
 
 // Fake ambient occlusion lighting per face direction
 #define LIGHT_TOP 0xFFFFFFFF
@@ -11,6 +12,106 @@ TileRenderer::TileRenderer(Level *level, Tesselator *opaqueTess, Tesselator *tra
       m_fancyTess(fancyTess), m_emitTess(emitTess) {}
 
 TileRenderer::~TileRenderer() {}
+
+// Render plants (cross sprites)
+bool TileRenderer::tesselateCrossInWorld(uint8_t id, int lx, int ly, int lz, int cx, int cz) {
+  const BlockUV &uv = g_blockUV[id];
+
+  int   wX = cx * CHUNK_SIZE_X + lx;
+  int   wY = ly;
+  int   wZ = cz * CHUNK_SIZE_Z + lz;
+
+  // Vertex positions in chunk-local space (model matrix handles translation)
+  float xt = (float)lx;
+  float yt = (float)ly;
+  float zt = (float)lz;
+
+  // Random offset constraint
+  if (id == BLOCK_TALLGRASS) {
+    int64_t seed = ((int64_t)wX * 3129871LL) ^ ((int64_t)wZ * 116129781LL) ^ ((int64_t)wY);
+    seed = seed * seed * 42317861LL + seed * 11LL;
+
+    xt += ((((seed >> 16) & 0xf) / 15.0f) - 0.5f) * 0.5f;
+    yt += ((((seed >> 20) & 0xf) / 15.0f) - 1.0f) * 0.2f;
+    zt += ((((seed >> 24) & 0xf) / 15.0f) - 0.5f) * 0.5f;
+  }
+
+  const float ts  = 1.0f / 16.0f;
+  const float eps = 0.125f / 256.0f;
+
+  // Sample light from the block position
+  float skyL, blkL;
+  {
+    // 4J brightness ramp: (1-v)/(v*3+1)
+    static const float lightTable[16] = {
+      0.0f, 0.0625f, 0.125f, 0.1875f, 0.25f, 0.3125f, 0.375f, 0.4375f,
+      0.5f, 0.5625f, 0.625f, 0.6875f, 0.75f, 0.8125f, 0.875f, 1.0f
+    };
+    static bool inited = false;
+    if (!inited) {
+      for (int i = 0; i <= 15; i++) {
+        float v = 1.0f - i / 15.0f;
+        const_cast<float*>(lightTable)[i] = (1.0f - v) / (v * 3.0f + 1.0f);
+      }
+      inited = true;
+    }
+    uint8_t sl = (wY + 1 < CHUNK_SIZE_Y) ? m_level->getSkyLight(wX, wY + 1, wZ)
+                                          : 15;
+    uint8_t bl = m_level->getBlockLight(wX, wY, wZ);
+    skyL = lightTable[sl];
+    blkL = lightTable[bl];
+  }
+  float brightness = (blkL > skyL + 0.05f) ? blkL : skyL;
+  
+  uint32_t baseColor = 0xFFFFFFFF;
+  // Apply biome green tint for tall grass (vanilla FoliageColor::getDefaultColor)
+  if (id == BLOCK_TALLGRASS) {
+      baseColor = 0xFF44a065; // PSP ABGR: R=0x44, G=0xa0, B=0x65 (vanilla ~0x65a044)
+  }
+  uint32_t col = applyLightToFace(baseColor, brightness);
+
+  float u0 = uv.top_x * ts + eps;
+  float v0 = uv.top_y * ts + eps;
+  float u1 = (uv.top_x + 1) * ts - eps;
+  float v1 = (uv.top_y + 1) * ts - eps;
+
+  // Cross width
+  const float width = 0.45f;
+  float x0 = xt + 0.5f - width;
+  float x1 = xt + 0.5f + width;
+  float z0 = zt + 0.5f - width;
+  float z1 = zt + 0.5f + width;
+
+  Tesselator *t = m_transTess;
+
+  // Diagonal 1: (x0,z0) -> (x1,z1)  front + back
+  t->addQuad(u0, v0, u1, v1, col, col, col, col,
+             x0, yt + 1.0f, z0,
+             x1, yt + 1.0f, z1,
+             x0, yt,        z0,
+             x1, yt,        z1);
+
+  t->addQuad(u0, v0, u1, v1, col, col, col, col,
+             x1, yt + 1.0f, z1,
+             x0, yt + 1.0f, z0,
+             x1, yt,        z1,
+             x0, yt,        z0);
+
+  // Diagonal 2: (x0,z1) -> (x1,z0)  front + back
+  t->addQuad(u0, v0, u1, v1, col, col, col, col,
+             x0, yt + 1.0f, z1,
+             x1, yt + 1.0f, z0,
+             x0, yt,        z1,
+             x1, yt,        z0);
+
+  t->addQuad(u0, v0, u1, v1, col, col, col, col,
+             x1, yt + 1.0f, z0,
+             x0, yt + 1.0f, z1,
+             x1, yt,        z0,
+             x0, yt,        z1);
+
+  return true;
+}
 
 bool TileRenderer::needFace(int lx, int ly, int lz, int cx, int cz, uint8_t id, int dx, int dy, int dz, bool &outIsFancy) {
   int nx = lx + dx, ny = ly + dy, nz = lz + dz;
@@ -57,10 +158,19 @@ float TileRenderer::getSkyLightRaw(int lx, int ly, int lz, int cx, int cz, int d
     skyL = m_level->getSkyLight(wNx, wNy, wNz);
   }
 
+  // 4J brightness ramp: (1-v)/(v*3+1)
   static const float lightTable[16] = {
-    0.05f, 0.067f, 0.085f, 0.106f, 0.129f, 0.156f, 0.186f, 0.221f,
-    0.261f, 0.309f, 0.367f, 0.437f, 0.525f, 0.638f, 0.789f, 1.0f
+    0.0f, 0.0625f, 0.125f, 0.1875f, 0.25f, 0.3125f, 0.375f, 0.4375f,
+    0.5f, 0.5625f, 0.625f, 0.6875f, 0.75f, 0.8125f, 0.875f, 1.0f
   };
+  static bool inited = false;
+  if (!inited) {
+    for (int i = 0; i <= 15; i++) {
+      float v = 1.0f - i / 15.0f;
+      const_cast<float*>(lightTable)[i] = (1.0f - v) / (v * 3.0f + 1.0f);
+    }
+    inited = true;
+  }
   return lightTable[skyL];
 }
 
@@ -68,10 +178,19 @@ float TileRenderer::getSkyLightRaw(int lx, int ly, int lz, int cx, int cz, int d
 float TileRenderer::getVertexSkyLight(int wx, int wy, int wz,
                                       int dx1, int dy1, int dz1,
                                       int dx2, int dy2, int dz2) {
+  // 4J brightness ramp: (1-v)/(v*3+1)
   static const float lightTable[16] = {
-    0.05f, 0.067f, 0.085f, 0.106f, 0.129f, 0.156f, 0.186f, 0.221f,
-    0.261f, 0.309f, 0.367f, 0.437f, 0.525f, 0.638f, 0.789f, 1.0f
+    0.0f, 0.0625f, 0.125f, 0.1875f, 0.25f, 0.3125f, 0.375f, 0.4375f,
+    0.5f, 0.5625f, 0.625f, 0.6875f, 0.75f, 0.8125f, 0.875f, 1.0f
   };
+  static bool inited = false;
+  if (!inited) {
+    for (int i = 0; i <= 15; i++) {
+      float v = 1.0f - i / 15.0f;
+      const_cast<float*>(lightTable)[i] = (1.0f - v) / (v * 3.0f + 1.0f);
+    }
+    inited = true;
+  }
 
   auto getS = [&](int x, int y, int z) -> float {
     if (y < 0 || y >= CHUNK_SIZE_Y) return 1.0f;
@@ -93,10 +212,19 @@ float TileRenderer::getVertexSkyLight(int wx, int wy, int wz,
 float TileRenderer::getVertexBlockLight(int wx, int wy, int wz,
                                         int dx1, int dy1, int dz1,
                                         int dx2, int dy2, int dz2) {
+  // 4J brightness ramp: (1-v)/(v*3+1)
   static const float lightTable[16] = {
-    0.05f, 0.067f, 0.085f, 0.106f, 0.129f, 0.156f, 0.186f, 0.221f,
-    0.261f, 0.309f, 0.367f, 0.437f, 0.525f, 0.638f, 0.789f, 1.0f
+    0.0f, 0.0625f, 0.125f, 0.1875f, 0.25f, 0.3125f, 0.375f, 0.4375f,
+    0.5f, 0.5625f, 0.625f, 0.6875f, 0.75f, 0.8125f, 0.875f, 1.0f
   };
+  static bool inited = false;
+  if (!inited) {
+    for (int i = 0; i <= 15; i++) {
+      float v = 1.0f - i / 15.0f;
+      const_cast<float*>(lightTable)[i] = (1.0f - v) / (v * 3.0f + 1.0f);
+    }
+    inited = true;
+  }
 
   auto getB = [&](int x, int y, int z) -> float {
     if (y < 0 || y >= CHUNK_SIZE_Y) return 0.0f;
@@ -123,11 +251,17 @@ uint32_t TileRenderer::applyLightToFace(uint32_t baseColor, float brightness) {
 }
 
 bool TileRenderer::tesselateBlockInWorld(uint8_t id, int lx, int ly, int lz, int cx, int cz) {
+  if (id == BLOCK_TALLGRASS || id == BLOCK_FLOWER || id == BLOCK_ROSE) {
+    return tesselateCrossInWorld(id, lx, ly, lz, cx, cz);
+  }
+
   const BlockUV &uv = g_blockUV[id];
 
-  float wx = (float)(cx * CHUNK_SIZE_X + lx);
+  // Vertex positions in chunk-local space
+  float wx = (float)lx;
   float wy = (float)ly;
-  float wz = (float)(cz * CHUNK_SIZE_Z + lz);
+  float wz = (float)lz;
+  // World coords for light lookups
   int wX = cx * CHUNK_SIZE_X + lx;
   int wY = ly;
   int wZ = cz * CHUNK_SIZE_Z + lz;
@@ -137,9 +271,7 @@ bool TileRenderer::tesselateBlockInWorld(uint8_t id, int lx, int ly, int lz, int
   bool drawn = false;
   bool isFancy = false;
 
-  // Helper: pick the right tesselator for a face and decide if block-lit
-  // A face is "block-lit" if block light clearly dominates sky light there
-  // → draw to emitTess (always full brightness) instead of opaqueTess (dimmed at night)
+  // Select tesselator based on lighting
   auto pickTess = [&](Tesselator *skyTess, Tesselator *fncTess,
                       float skyL, float blkL, bool fancy) -> Tesselator * {
     if (g_blockProps[id].isTransparent()) {

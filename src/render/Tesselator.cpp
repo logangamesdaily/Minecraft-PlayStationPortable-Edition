@@ -50,14 +50,9 @@ void Tesselator::addQuad(float u0, float v0, float u1, float v1, uint32_t c0,
 
   CraftPSPVertex *v = &m_buffer[m_vertexCount];
 
-  // Triangles:
-  // v0 (u0, v0) - c0 - x0, y0, z0
-  // v1 (u1, v0) - c1 - x1, y1, z1
-  // v2 (u0, v1) - c2 - x2, y2, z2
-  // v3 (u1, v1) - c3 - x3, y3, z3
+  // v0..v3 quad corners
 
-  // Compare sums of diagonally opposite light intensities (using Green channel
-  // as brightness ref)
+  // Pick diagonal based on brightness (avoids light seams)
   uint32_t l03 = ((c0 >> 8) & 0xFF) + ((c3 >> 8) & 0xFF);
   uint32_t l12 = ((c1 >> 8) & 0xFF) + ((c2 >> 8) & 0xFF);
 

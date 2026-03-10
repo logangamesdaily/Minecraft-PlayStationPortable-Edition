@@ -4,10 +4,7 @@
 #include <pspgum.h>
 #include <math.h>
 
-struct AABB {
-    float minX, minY, minZ;
-    float maxX, maxY, maxZ;
-};
+#include "../world/AABB.h"
 
 struct Plane {
     float a, b, c, d;

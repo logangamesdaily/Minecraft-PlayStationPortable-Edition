@@ -1,6 +1,4 @@
-// Adapted from Minecraft.World/Mth.cpp (4J Studios, 2014)
-// Modifications: __int64 -> int64_t, removed wstring, removed std::abs
-// ambiguity
+// Mth.cpp
 
 #include "Mth.h"
 #include "Random.h"

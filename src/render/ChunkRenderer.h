@@ -20,6 +20,9 @@ public:
 
   void setLevel(Level *level);
   void render(float camX, float camY, float camZ);
+  // Immediately compile a single subchunk (all 5 steps in one frame).
+  // Use this for player-triggered block changes to avoid visible holes.
+  void rebuildChunkNow(int cx, int cz, int sy);
 
 private:
   Level *m_level;

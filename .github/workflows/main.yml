@@ -1,0 +1,71 @@
+name: Build PSP Game (Dev)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git wget zip
+
+      # Cache the PSP toolchain
+      - name: Cache PSPSDK
+        id: cache-pspdev
+        uses: actions/cache@v4
+        with:
+          path: ~/pspdev
+          key: pspdev-${{ runner.os }}-v1
+
+      - name: Build PSPSDK (if not cached)
+        if: steps.cache-pspdev.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/pspdev/psptoolchain.git
+          cd psptoolchain
+          ./toolchain.sh
+
+      - name: Set up environment variables
+        run: |
+          echo "PSPDEV=$HOME/pspdev" >> $GITHUB_ENV
+          echo "PSPSDK=$HOME/pspdev/psp/sdk" >> $GITHUB_ENV
+          echo "$HOME/pspdev/bin" >> $GITHUB_PATH
+
+      - name: Build project
+        run: make
+
+      - name: Prepare package
+        run: |
+          mkdir -p MinecraftPSP
+          cp EBOOT.PBP MinecraftPSP/
+          cp -r res MinecraftPSP/
+          zip -r MinecraftPSP.zip MinecraftPSP
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MinecraftPSP
+          path: MinecraftPSP.zip
+
+      - name: Create/Update Development Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-build
+          name: Development Build
+          body: |
+            🚧 Automated development build
+            
+            - Built from latest commit on `main`
+            - Not guaranteed stable
+          prerelease: true
+          files: MinecraftPSP.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

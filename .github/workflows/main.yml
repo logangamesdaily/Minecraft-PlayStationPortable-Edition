@@ -29,6 +29,9 @@ jobs:
       - name: Build PSPSDK (if not cached)
         if: steps.cache-pspdev.outputs.cache-hit != 'true'
         run: |
+          export PSPDEV=$HOME/pspdev
+          export PATH=$PSPDEV/bin:$PATH
+
           git clone https://github.com/pspdev/psptoolchain.git
           cd psptoolchain
           ./toolchain.sh
